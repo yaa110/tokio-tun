@@ -153,14 +153,6 @@ impl Tun {
         Ok(tuns)
     }
 
-    /// Clones tun instance.
-    pub fn try_clone(&self) -> Result<Self> {
-        Ok(Self {
-            iface: self.iface.clone(),
-            io: PollEvented::new(self.io.get_ref().clone())?,
-        })
-    }
-
     /// Returns the name of Tun/Tap device.
     pub fn name(&self) -> &str {
         self.iface.name()
