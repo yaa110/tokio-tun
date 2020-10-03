@@ -2,7 +2,7 @@
 
 [![Build](https://github.com/yaa110/tokio-tun/workflows/Build/badge.svg)](https://github.com/yaa110/tokio-tun/actions) [![crates.io](https://img.shields.io/crates/v/tokio-tun.svg)](https://crates.io/crates/tokio-tun) [![Documentation](https://img.shields.io/badge/docs-tokio--tun-blue.svg)](https://docs.rs/tokio-tun) [![examples](https://img.shields.io/badge/examples-tokio--tun-blue.svg)](examples)
 
-Asynchronous allocation of TUN/TAP devices in Rust using [`tokio`](https://crates.io/crates/tokio).
+Asynchronous allocation of TUN/TAP devices in Rust using [`tokio`](https://crates.io/crates/tokio). Use [async-tun](https://crates.io/crates/async-tun) for `async-std` version.
 
 ## Getting Started
 
