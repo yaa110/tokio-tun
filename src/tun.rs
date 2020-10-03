@@ -1,11 +1,9 @@
-use super::interface::Interface;
-use super::params::Params;
+use crate::linux::interface::Interface;
+use crate::linux::io::TunIo;
+use crate::linux::params::Params;
 use crate::result::Result;
-use mio::event::Evented;
-use mio::unix::EventedFd;
-use mio::{Poll, PollOpt, Ready, Token};
 use std::ffi::CString;
-use std::io::{self, Read, Write};
+use std::io;
 use std::net::Ipv4Addr;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::pin::Pin;
@@ -19,77 +17,9 @@ pub struct Tun {
     io: PollEvented<TunIo>,
 }
 
-#[derive(Clone)]
-struct TunIo {
-    fd: RawFd,
-    arc: Arc<()>,
-}
-
-impl Evented for TunIo {
-    fn register(
-        &self,
-        poll: &Poll,
-        token: Token,
-        interest: Ready,
-        opts: PollOpt,
-    ) -> io::Result<()> {
-        EventedFd(&self.fd).register(poll, token, interest, opts)
-    }
-
-    fn reregister(
-        &self,
-        poll: &Poll,
-        token: Token,
-        interest: Ready,
-        opts: PollOpt,
-    ) -> io::Result<()> {
-        EventedFd(&self.fd).reregister(poll, token, interest, opts)
-    }
-
-    fn deregister(&self, poll: &Poll) -> io::Result<()> {
-        EventedFd(&self.fd).deregister(poll)
-    }
-}
-
-impl Read for TunIo {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let n = unsafe { libc::read(self.fd, buf.as_ptr() as *mut _, buf.len() as _) };
-        if n < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(n as _)
-    }
-}
-
-impl Write for TunIo {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let n = unsafe { libc::write(self.fd, buf.as_ptr() as *const _, buf.len() as _) };
-        if n < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(n as _)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        let ret = unsafe { libc::fsync(self.fd) };
-        if ret < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(())
-    }
-}
-
 impl AsRawFd for Tun {
     fn as_raw_fd(&self) -> RawFd {
-        self.io.get_ref().fd
-    }
-}
-
-impl Drop for TunIo {
-    fn drop(&mut self) {
-        if Arc::strong_count(&self.arc) == 1 {
-            unsafe { libc::close(self.fd) };
-        }
+        self.io.get_ref().as_raw_fd()
     }
 }
 
@@ -124,33 +54,42 @@ impl AsyncWrite for Tun {
 impl Tun {
     /// Creates a new instance of Tun/Tap device.
     pub(crate) fn new(params: Params) -> Result<Self> {
-        let iface = Self::interface(params, 1)?;
+        let iface = Self::allocate(params, 1)?;
         let fd = iface.files()[0];
         Ok(Self {
             iface: Arc::new(iface),
-            io: PollEvented::new(TunIo {
-                fd,
-                arc: Arc::new(()),
-            })?,
+            io: PollEvented::new(fd.into())?,
         })
     }
 
     /// Creates a new instance of Tun/Tap device.
     pub(crate) fn new_mq(params: Params, queues: usize) -> Result<Vec<Self>> {
-        let iface = Self::interface(params, queues)?;
+        let iface = Self::allocate(params, queues)?;
         let mut tuns = Vec::with_capacity(queues);
         let files = iface.files().to_vec();
         let iface = Arc::new(iface);
         for fd in files.into_iter() {
             tuns.push(Self {
                 iface: iface.clone(),
-                io: PollEvented::new(TunIo {
-                    fd,
-                    arc: Arc::new(()),
-                })?,
+                io: PollEvented::new(fd.into())?,
             })
         }
         Ok(tuns)
+    }
+
+    fn allocate(params: Params, queues: usize) -> Result<Interface> {
+        let mut fds = Vec::with_capacity(queues);
+        let path = CString::new("/dev/net/tun")?;
+        for _ in 0..queues {
+            fds.push(unsafe { libc::open(path.as_ptr(), libc::O_RDWR | libc::O_NONBLOCK) });
+        }
+        let iface = Interface::new(
+            fds,
+            params.name.as_deref().unwrap_or_default(),
+            params.flags,
+        )?;
+        iface.init(params)?;
+        Ok(iface)
     }
 
     /// Returns the name of Tun/Tap device.
@@ -186,20 +125,5 @@ impl Tun {
     /// Returns the flags of MTU.
     pub fn flags(&self) -> Result<i16> {
         self.iface.flags(None)
-    }
-
-    fn interface(params: Params, queues: usize) -> Result<Interface> {
-        let mut fds = Vec::with_capacity(queues);
-        let path = CString::new("/dev/net/tun")?;
-        for _ in 0..queues {
-            fds.push(unsafe { libc::open(path.as_ptr(), libc::O_RDWR | libc::O_NONBLOCK) });
-        }
-        let iface = Interface::new(
-            fds,
-            params.name.as_deref().unwrap_or_default(),
-            params.flags,
-        )?;
-        iface.alloc(params)?;
-        Ok(iface)
     }
 }

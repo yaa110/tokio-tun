@@ -47,7 +47,7 @@ impl Interface {
         })
     }
 
-    pub fn alloc(&self, params: Params) -> Result<()> {
+    pub fn init(&self, params: Params) -> Result<()> {
         if let Some(mtu) = params.mtu {
             self.mtu(Some(mtu))?;
         }

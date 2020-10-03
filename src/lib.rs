@@ -2,14 +2,15 @@
 mod linux {
     pub mod address;
     pub mod interface;
+    pub mod io;
     pub mod params;
     pub mod request;
-    pub mod tun;
 }
 
 mod builder;
+mod tun;
 
 pub mod result;
 
 pub use self::builder::TunBuilder;
-pub use self::linux::tun::Tun;
+pub use self::tun::Tun;
