@@ -51,9 +51,9 @@ async fn main() -> Result<()> {
 
     loop {
         let (buf, id) = tokio::select! {
-            n = tun0.read(&mut buf0) => (&buf0[..n?], 0),
-            n = tun1.read(&mut buf1) => (&buf1[..n?], 0),
-            n = tun2.read(&mut buf2) => (&buf2[..n?], 0),
+            Ok(n) = tun0.read(&mut buf0) => (&buf0[..n], 0),
+            Ok(n) = tun1.read(&mut buf1) => (&buf1[..n], 1),
+            Ok(n) = tun2.read(&mut buf2) => (&buf2[..n], 2),
         };
         println!("reading {} bytes from tuns[{}]: {:?}", buf.len(), id, buf);
     }
