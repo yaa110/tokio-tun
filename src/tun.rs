@@ -1,25 +1,25 @@
 use crate::linux::interface::Interface;
-use crate::linux::io::TunIo;
 use crate::linux::params::Params;
 use crate::result::Result;
 use std::ffi::CString;
 use std::io;
 use std::net::Ipv4Addr;
-use std::os::unix::io::{AsRawFd, RawFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{self, Context};
-use tokio::io::{AsyncRead, AsyncWrite, PollEvented};
+use tokio::fs::File;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 /// Represents a Tun/Tap device. Use [`TunBuilder`](struct.TunBuilder.html) to create a new instance of [`Tun`](struct.Tun.html).
 pub struct Tun {
     iface: Arc<Interface>,
-    io: PollEvented<TunIo>,
+    io: File,
 }
 
 impl AsRawFd for Tun {
     fn as_raw_fd(&self) -> RawFd {
-        self.io.get_ref().as_raw_fd()
+        self.io.as_raw_fd()
     }
 }
 
@@ -27,8 +27,8 @@ impl AsyncRead for Tun {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-        buf: &mut [u8],
-    ) -> task::Poll<io::Result<usize>> {
+        buf: &mut ReadBuf<'_>,
+    ) -> task::Poll<io::Result<()>> {
         Pin::new(&mut self.get_mut().io).poll_read(cx, buf)
     }
 }
@@ -58,7 +58,7 @@ impl Tun {
         let fd = iface.files()[0];
         Ok(Self {
             iface: Arc::new(iface),
-            io: PollEvented::new(fd.into())?,
+            io: unsafe { File::from_raw_fd(fd) },
         })
     }
 
@@ -71,7 +71,7 @@ impl Tun {
         for fd in files.into_iter() {
             tuns.push(Self {
                 iface: iface.clone(),
-                io: PollEvented::new(fd.into())?,
+                io: unsafe { File::from_raw_fd(fd) },
             })
         }
         Ok(tuns)
@@ -81,7 +81,7 @@ impl Tun {
         let mut fds = Vec::with_capacity(queues);
         let path = CString::new("/dev/net/tun")?;
         for _ in 0..queues {
-            fds.push(unsafe { libc::open(path.as_ptr(), libc::O_RDWR | libc::O_NONBLOCK) });
+            fds.push(unsafe { libc::open(path.as_ptr(), libc::O_RDWR) });
         }
         let iface = Interface::new(
             fds,

@@ -2,7 +2,6 @@
 mod linux {
     pub mod address;
     pub mod interface;
-    pub mod io;
     pub mod params;
     pub mod request;
 }
