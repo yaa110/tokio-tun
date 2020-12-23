@@ -9,12 +9,6 @@ Asynchronous allocation of TUN/TAP devices in Rust using [`tokio`](https://crate
 - Create a tun device using `TunBuilder` and read from it in a loop:
 
 ```rust
-use std::net::Ipv4Addr;
-use std::os::unix::io::AsRawFd;
-use tokio::prelude::*;
-use tokio_tun::result::Result;
-use tokio_tun::TunBuilder;
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let tun = TunBuilder::new()

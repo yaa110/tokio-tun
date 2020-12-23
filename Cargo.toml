@@ -1,6 +1,6 @@
 [package]
 name = "tokio-tun"
-version = "0.2.3"
+version = "0.3.0"
 authors = ["Navid <yaa110@gmail.com>"]
 edition = "2018"
 homepage = "https://github.com/yaa110/tokio-tun"
@@ -13,12 +13,12 @@ categories = ["asynchronous", "network-programming"]
 keywords = ["tun", "tap", "async", "mio", "tokio"]
 
 [dependencies]
-tokio = { version = "0.3", features = ["fs"] }
+tokio = { version = "1.0", features = ["fs"] }
 libc = "0.2"
 nix = "0.19"
 
 [dev-dependencies]
-tokio = { version = "0.3", features = ["full"] }
+tokio = { version = "1.0", features = ["full"] }
 
 [build-dependencies]
-bindgen = "0.55"
+bindgen = "0.56"

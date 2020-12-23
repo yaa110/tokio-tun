@@ -1,6 +1,6 @@
 use std::net::Ipv4Addr;
 use std::os::unix::io::AsRawFd;
-use tokio::prelude::*;
+use tokio::io::AsyncReadExt;
 use tokio_tun::result::Result;
 use tokio_tun::TunBuilder;
 
