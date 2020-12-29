@@ -1,6 +1,6 @@
 [package]
 name = "tokio-tun"
-version = "0.3.0"
+version = "0.3.1"
 authors = ["Navid <yaa110@gmail.com>"]
 edition = "2018"
 homepage = "https://github.com/yaa110/tokio-tun"
@@ -19,6 +19,3 @@ nix = "0.19"
 
 [dev-dependencies]
 tokio = { version = "1.0", features = ["full"] }
-
-[build-dependencies]
-bindgen = "0.56"
