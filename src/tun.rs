@@ -1,20 +1,23 @@
 use crate::linux::interface::Interface;
+use crate::linux::io::TunIo;
 use crate::linux::params::Params;
 use crate::result::Result;
+use futures::ready;
 use std::ffi::CString;
 use std::io;
+use std::io::{Read, Write};
 use std::net::Ipv4Addr;
-use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+use std::os::unix::io::{AsRawFd, RawFd};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{self, Context};
-use tokio::fs::File;
+use std::task::{self, Context, Poll};
+use tokio::io::unix::AsyncFd;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 /// Represents a Tun/Tap device. Use [`TunBuilder`](struct.TunBuilder.html) to create a new instance of [`Tun`](struct.Tun.html).
 pub struct Tun {
     iface: Arc<Interface>,
-    io: File,
+    io: AsyncFd<TunIo>,
 }
 
 impl AsRawFd for Tun {
@@ -29,7 +32,19 @@ impl AsyncRead for Tun {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> task::Poll<io::Result<()>> {
-        Pin::new(&mut self.get_mut().io).poll_read(cx, buf)
+        let self_mut = self.get_mut();
+        let mut b = [0u8; 1024];
+        loop {
+            let mut guard = ready!(self_mut.io.poll_read_ready_mut(cx))?;
+
+            match guard.try_io(|inner| inner.get_mut().read(&mut b)) {
+                Ok(n) => {
+                    buf.put_slice(&b[..n?]);
+                    return Poll::Ready(Ok(()));
+                }
+                Err(_) => continue,
+            }
+        }
     }
 }
 
@@ -39,15 +54,31 @@ impl AsyncWrite for Tun {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> task::Poll<io::Result<usize>> {
-        Pin::new(&mut self.get_mut().io).poll_write(cx, buf)
+        let self_mut = self.get_mut();
+        loop {
+            let mut guard = ready!(self_mut.io.poll_write_ready_mut(cx))?;
+
+            match guard.try_io(|inner| inner.get_mut().write(buf)) {
+                Ok(result) => return Poll::Ready(result),
+                Err(_would_block) => continue,
+            }
+        }
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> task::Poll<io::Result<()>> {
-        Pin::new(&mut self.get_mut().io).poll_flush(cx)
+        let self_mut = self.get_mut();
+        loop {
+            let mut guard = ready!(self_mut.io.poll_write_ready_mut(cx))?;
+
+            match guard.try_io(|inner| inner.get_mut().flush()) {
+                Ok(result) => return Poll::Ready(result),
+                Err(_) => continue,
+            }
+        }
     }
 
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> task::Poll<io::Result<()>> {
-        Pin::new(&mut self.get_mut().io).poll_shutdown(cx)
+    fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> task::Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
     }
 }
 
@@ -58,7 +89,7 @@ impl Tun {
         let fd = iface.files()[0];
         Ok(Self {
             iface: Arc::new(iface),
-            io: unsafe { File::from_raw_fd(fd) },
+            io: AsyncFd::new(TunIo::from(fd))?,
         })
     }
 
@@ -71,7 +102,7 @@ impl Tun {
         for fd in files.into_iter() {
             tuns.push(Self {
                 iface: iface.clone(),
-                io: unsafe { File::from_raw_fd(fd) },
+                io: AsyncFd::new(TunIo::from(fd))?,
             })
         }
         Ok(tuns)
@@ -81,7 +112,7 @@ impl Tun {
         let mut fds = Vec::with_capacity(queues);
         let path = CString::new("/dev/net/tun")?;
         for _ in 0..queues {
-            fds.push(unsafe { libc::open(path.as_ptr(), libc::O_RDWR) });
+            fds.push(unsafe { libc::open(path.as_ptr(), libc::O_RDWR | libc::O_NONBLOCK) });
         }
         let iface = Interface::new(
             fds,
