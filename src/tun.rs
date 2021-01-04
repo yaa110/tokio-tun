@@ -33,7 +33,7 @@ impl AsyncRead for Tun {
         buf: &mut ReadBuf<'_>,
     ) -> task::Poll<io::Result<()>> {
         let self_mut = self.get_mut();
-        let mut b = [0u8; 1024];
+        let mut b = vec![0; buf.capacity()];
         loop {
             let mut guard = ready!(self_mut.io.poll_read_ready_mut(cx))?;
 
