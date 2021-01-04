@@ -1,6 +1,6 @@
 [package]
 name = "tokio-tun"
-version = "0.3.3"
+version = "0.3.4"
 authors = ["Navid <yaa110@gmail.com>"]
 edition = "2018"
 homepage = "https://github.com/yaa110/tokio-tun"
@@ -10,7 +10,7 @@ license = "MIT OR Apache-2.0"
 readme = "README.md"
 description = "Asynchronous allocation of TUN/TAP devices using tokio"
 categories = ["asynchronous", "network-programming"]
-keywords = ["tun", "tap", "async", "mio", "tokio"]
+keywords = ["tun", "tap", "async", "tokio"]
 
 [dependencies]
 tokio = { version = "1.0", features = ["net"] }

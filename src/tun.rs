@@ -38,10 +38,7 @@ impl AsyncRead for Tun {
             let mut guard = ready!(self_mut.io.poll_read_ready_mut(cx))?;
 
             match guard.try_io(|inner| inner.get_mut().read(&mut b)) {
-                Ok(n) => {
-                    buf.put_slice(&b[..n?]);
-                    return Poll::Ready(Ok(()));
-                }
+                Ok(n) => return Poll::Ready(n.map(|n| buf.put_slice(&b[..n]))),
                 Err(_) => continue,
             }
         }
