@@ -61,7 +61,7 @@ impl ifreq {
     pub fn new(name: &str) -> Self {
         let mut req: ifreq = unsafe { mem::zeroed() };
         if !name.is_empty() {
-            let mut ifname: [i8; IFNAMSIZ as _] = [0; IFNAMSIZ as _];
+            let mut ifname: [::std::os::raw::c_char; IFNAMSIZ as _] = [0; IFNAMSIZ as _];
             for (i, c) in name.as_bytes().iter().enumerate() {
                 if i > ifname.len() - 1 {
                     break;
