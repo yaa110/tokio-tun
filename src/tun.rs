@@ -120,6 +120,34 @@ impl Tun {
         Ok(iface)
     }
 
+    /// Receives a packet from the Tun/Tap interface
+    ///
+    /// This method takes &self, so it is possible to call this method concurrently with other methods on this struct.
+    pub async fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
+        loop {
+            let mut guard = self.io.readable().await?;
+
+            match guard.try_io(|inner| inner.get_ref().recv(buf)) {
+                Ok(res) => return res,
+                Err(_) => continue,
+            }
+        }
+    }
+
+    /// Sends a packet to the Tun/Tap interface
+    ///
+    /// This method takes &self, so it is possible to call this method concurrently with other methods on this struct.
+    pub async fn send(&self, buf: &[u8]) -> io::Result<usize> {
+        loop {
+            let mut guard = self.io.writable().await?;
+
+            match guard.try_io(|inner| inner.get_ref().send(buf)) {
+                Ok(res) => return res,
+                Err(_) => continue,
+            }
+        }
+    }
+
     /// Returns the name of Tun/Tap device.
     pub fn name(&self) -> &str {
         self.iface.name()
