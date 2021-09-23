@@ -13,10 +13,10 @@ categories = ["asynchronous", "network-programming"]
 keywords = ["tun", "tap", "async", "tokio"]
 
 [dependencies]
-tokio = { version = "1.11", features = ["net"] }
+tokio = { version = "1.12", features = ["net"] }
 libc = "0.2"
 nix = "0.22"
 futures = "0.3"
 
 [dev-dependencies]
-tokio = { version = "1.11", features = ["full"] }
+tokio = { version = "1.12", features = ["full"] }
