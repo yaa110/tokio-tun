@@ -171,6 +171,12 @@ impl Interface {
         }
         Ok(())
     }
+
+    pub fn index(&self) -> Result<::std::os::raw::c_int> {
+        let mut req = ifreq::new(self.name());
+        unsafe { siocgifindex(self.socket, &mut req) }?;
+        Ok(unsafe { req.ifr_ifru.ifru_ifindex })
+    }
 }
 
 impl Drop for Interface {
