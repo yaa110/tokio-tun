@@ -1,10 +1,17 @@
-use super::request::sockaddr;
+use super::request::{sockaddr, in6_addr};
 use std::mem;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
+/// A utility trait used to convert between rust and C IPv4 address representations
 pub trait Ipv4AddrExt {
     fn to_address(&self) -> sockaddr;
     fn from_address(sock: sockaddr) -> Self;
+}
+
+/// A utility trait used to convert between rust and C IPv6 address representations
+pub trait Ipv6AddrExt {
+    fn to_address(&self) -> in6_addr;
+    fn from_address(address: in6_addr) -> Self;
 }
 
 fn hton(octets: [u8; 4]) -> u32 {
@@ -34,5 +41,17 @@ impl Ipv4AddrExt for Ipv4Addr {
     fn from_address(addr: sockaddr) -> Self {
         let sock: libc::sockaddr_in = unsafe { mem::transmute(addr) };
         ntoh(sock.sin_addr.s_addr).into()
+    }
+}
+
+impl Ipv6AddrExt for Ipv6Addr {
+    fn to_address(&self) -> in6_addr {
+        in6_addr {
+            s6_addr: self.octets(),
+        }
+    }
+
+    fn from_address(address: in6_addr) -> Self {
+        Self::from(address.s6_addr)
     }
 }
