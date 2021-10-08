@@ -132,7 +132,7 @@ impl Tun {
 
     /// Returns the IPv4 address of MTU.
     pub fn address(&self) -> Result<IpAddr> {
-        self.iface.address(None)
+        self.iface.address(None, 0)
     }
 
     /// Returns the IPv4 destination address of MTU.

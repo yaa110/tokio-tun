@@ -18,6 +18,7 @@ pub struct TunBuilder<'a> {
     owner: Option<i32>,
     group: Option<i32>,
     address: Option<IpAddr>,
+    prefix_length: u32,
     destination: Option<Ipv4Addr>,
     broadcast: Option<Ipv4Addr>,
     netmask: Option<Ipv4Addr>,
@@ -35,6 +36,7 @@ impl<'a> Default for TunBuilder<'a> {
             mtu: None,
             packet_info: true,
             address: None,
+            prefix_length: 128,
             destination: None,
             broadcast: None,
             netmask: None,
@@ -87,6 +89,15 @@ impl<'a> TunBuilder<'a> {
     /// Sets IPv4 address of device.
     pub fn address(mut self, address: IpAddr) -> Self {
         self.address = Some(address);
+        self
+    }
+
+    /// Sets the IPv6 prefix length
+    ///
+    /// This is only useful when setting an IPv6 address via [`TunBuilder::address()`] because only IPv6 addresses
+    /// have the concept of prefixes. If IPv4 is used, call [`TunBuilder::netmask()`] instead.
+    pub fn prefix_length(mut self, prefix_length: u32) -> Self {
+        self.prefix_length = prefix_length;
         self
     }
 
@@ -154,6 +165,7 @@ impl<'a> From<TunBuilder<'a>> for Params {
             owner: builder.owner,
             group: builder.group,
             address: builder.address,
+            prefix_length: builder.prefix_length,
             destination: builder.destination,
             broadcast: builder.broadcast,
             netmask: builder.netmask,

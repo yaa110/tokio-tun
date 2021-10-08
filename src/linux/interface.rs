@@ -1,9 +1,8 @@
 use super::params::Params;
-use super::request::{ifreq, in6_ifreq, in6_addr};
+use super::request::{ifreq, in6_ifreq};
 use crate::linux::address::{Ipv4AddrExt, Ipv6AddrExt};
 use crate::result::Result;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use nix::errno::Errno::EADDRNOTAVAIL;
+use std::net::{IpAddr, Ipv4Addr};
 
 nix::ioctl_write_int!(tunsetiff, b'T', 202);
 nix::ioctl_write_int!(tunsetpersist, b'T', 203);
@@ -63,7 +62,7 @@ impl Interface {
             self.group(group)?;
         }
         if let Some(address) = params.address {
-            self.address(Some(address))?;
+            self.address(Some(address), params.prefix_length)?;
         }
         if let Some(netmask) = params.netmask {
             self.netmask(Some(netmask))?;
@@ -113,7 +112,7 @@ impl Interface {
         Ok(unsafe { Ipv4Addr::from_address(req.ifr_ifru.ifru_netmask) })
     }
 
-    pub fn address(&self, address: Option<IpAddr>) -> Result<IpAddr> {
+    pub fn address(&self, address: Option<IpAddr>, prefix_length: u32) -> Result<IpAddr> {
         match address {
             None => {
                 // TODO handle IPv6 addresses
@@ -133,7 +132,7 @@ impl Interface {
                     IpAddr::V6(address) => {
                         let req = in6_ifreq {
                             ifr6_ifindex: self.index()?,
-                            ifr6_prefixlen: 128,
+                            ifr6_prefixlen: prefix_length,
                             ifr6_addr: address.to_address(),
                         };
                         unsafe { siocsifaddr6(self.socket6, &req) }?;
