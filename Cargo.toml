@@ -1,8 +1,8 @@
 [package]
 name = "tokio-tun"
-version = "0.3.16"
+version = "0.4.0"
 authors = ["Navid <yaa110@gmail.com>"]
-edition = "2018"
+edition = "2021"
 homepage = "https://github.com/yaa110/tokio-tun"
 repository = "https://github.com/yaa110/tokio-tun"
 documentation = "https://docs.rs/tokio-tun"
@@ -15,7 +15,7 @@ keywords = ["tun", "tap", "async", "tokio"]
 [dependencies]
 tokio = { version = "1.12", features = ["net"] }
 libc = "0.2"
-nix = "0.22"
+nix = "0.23"
 futures = "0.3"
 
 [dev-dependencies]
