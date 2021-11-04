@@ -2,14 +2,32 @@ name: Build
 
 on:
   push:
-    branches: [ master ]
+    branches: [master]
   pull_request:
-    branches: [ master ]
+    branches: [master]
 
 jobs:
   linux:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v2
-    - name: Build the crate
-      run: cargo build -j`nproc`
+      - name: checkout the code
+        uses: actions/checkout@v2
+      - name: Stable with rustfmt and clippy
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          components: rustfmt, clippy
+      - name: Debug build
+        uses: actions-rs/cargo@v1
+        with:
+          command: build
+      - name: Check format
+        uses: actions-rs/cargo@v1
+        with:
+          command: fmt
+          args: -- --check
+      - name: Run clippy
+        uses: actions-rs/cargo@v1
+        with:
+          command: clippy
