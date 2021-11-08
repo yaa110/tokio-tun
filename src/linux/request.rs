@@ -9,9 +9,20 @@ const IFNAMSIZ: u32 = 16;
 
 #[repr(C)]
 #[derive(Copy, Clone)]
+/// Network interface ioctl request
+///
+/// See [man netdevice(7)](https://man7.org/linux/man-pages/man7/netdevice.7.html)
 pub struct ifreq {
     pub ifr_ifrn: ifreq_ifrn,
     pub ifr_ifru: ifreq_ifru,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct in6_ifreq {
+    pub ifr6_addr: in6_addr,
+    pub ifr6_prefixlen: ::std::os::raw::c_uint,
+    pub ifr6_ifindex: ::std::os::raw::c_int,
 }
 
 #[repr(C)]
@@ -30,6 +41,7 @@ pub union ifreq_ifru {
     pub ifru_netmask: sockaddr,
     pub ifru_hwaddr: sockaddr,
     pub ifru_flags: ::std::os::raw::c_short,
+    pub ifru_ifindex: ::std::os::raw::c_int,
     pub ifru_ivalue: ::std::os::raw::c_int,
     pub ifru_mtu: ::std::os::raw::c_int,
     pub ifru_map: ifmap,
@@ -41,10 +53,17 @@ pub union ifreq_ifru {
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
+/// Linux kernel IPv4 socket address representation
+///
+/// See [man ip(7)](https://man7.org/linux/man-pages/man7/ip.7.html)
 pub struct sockaddr {
+    // see https://man7.org/linux/man-pages/man7/ip.7.html for docs
     pub sa_family: ::std::os::raw::c_ushort,
     pub sa_data: [::std::os::raw::c_char; 14usize],
 }
+
+// See https://man7.org/linux/man-pages/man7/ipv6.7.html
+pub type in6_addr = libc::in6_addr;
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]

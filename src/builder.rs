@@ -5,7 +5,7 @@ use crate::linux::params::Params;
 use crate::tun::Tun;
 use core::convert::From;
 use libc::{IFF_NO_PI, IFF_TAP, IFF_TUN};
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, IpAddr};
 
 /// Represents a factory to build new instances of [`Tun`](struct.Tun.html).
 pub struct TunBuilder<'a> {
@@ -17,7 +17,8 @@ pub struct TunBuilder<'a> {
     mtu: Option<i32>,
     owner: Option<i32>,
     group: Option<i32>,
-    address: Option<Ipv4Addr>,
+    address: Option<IpAddr>,
+    prefix_length: u32,
     destination: Option<Ipv4Addr>,
     broadcast: Option<Ipv4Addr>,
     netmask: Option<Ipv4Addr>,
@@ -35,6 +36,7 @@ impl<'a> Default for TunBuilder<'a> {
             mtu: None,
             packet_info: true,
             address: None,
+            prefix_length: 128,
             destination: None,
             broadcast: None,
             netmask: None,
@@ -85,8 +87,17 @@ impl<'a> TunBuilder<'a> {
     }
 
     /// Sets IPv4 address of device.
-    pub fn address(mut self, address: Ipv4Addr) -> Self {
+    pub fn address(mut self, address: IpAddr) -> Self {
         self.address = Some(address);
+        self
+    }
+
+    /// Sets the IPv6 prefix length
+    ///
+    /// This is only useful when setting an IPv6 address via [`TunBuilder::address()`] because only IPv6 addresses
+    /// have the concept of prefixes. If IPv4 is used, call [`TunBuilder::netmask()`] instead.
+    pub fn prefix_length(mut self, prefix_length: u32) -> Self {
+        self.prefix_length = prefix_length;
         self
     }
 
@@ -142,7 +153,7 @@ impl<'a> From<TunBuilder<'a>> for Params {
                 Some(builder.name.into())
             },
             flags: {
-                let mut flags = if builder.is_tap { IFF_TAP } else { IFF_TUN } as _;
+                let mut flags: i16 = if builder.is_tap { IFF_TAP } else { IFF_TUN } as _;
                 if !builder.packet_info {
                     flags |= IFF_NO_PI as i16;
                 }
@@ -154,6 +165,7 @@ impl<'a> From<TunBuilder<'a>> for Params {
             owner: builder.owner,
             group: builder.group,
             address: builder.address,
+            prefix_length: builder.prefix_length,
             destination: builder.destination,
             broadcast: builder.broadcast,
             netmask: builder.netmask,

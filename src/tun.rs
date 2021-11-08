@@ -6,7 +6,7 @@ use futures::ready;
 use std::ffi::CString;
 use std::io;
 use std::io::{Read, Write};
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -131,8 +131,8 @@ impl Tun {
     }
 
     /// Returns the IPv4 address of MTU.
-    pub fn address(&self) -> Result<Ipv4Addr> {
-        self.iface.address(None)
+    pub fn address(&self) -> Result<IpAddr> {
+        self.iface.address(None, 0)
     }
 
     /// Returns the IPv4 destination address of MTU.
