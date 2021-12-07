@@ -24,21 +24,13 @@ impl AsRawFd for TunIo {
 
 impl Read for TunIo {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let n = unsafe { libc::read(self.0, buf.as_ptr() as *mut _, buf.len() as _) };
-        if n < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(n as _)
+        self.recv(buf)
     }
 }
 
 impl Write for TunIo {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let n = unsafe { libc::write(self.0, buf.as_ptr() as *const _, buf.len() as _) };
-        if n < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(n as _)
+        self.send(buf)
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -47,6 +39,24 @@ impl Write for TunIo {
             return Err(io::Error::last_os_error());
         }
         Ok(())
+    }
+}
+
+impl TunIo {
+    pub fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = unsafe { libc::read(self.0, buf.as_ptr() as *mut _, buf.len() as _) };
+        if n < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(n as _)
+    }
+
+    pub fn send(&self, buf: &[u8]) -> io::Result<usize> {
+        let n = unsafe { libc::write(self.0, buf.as_ptr() as *const _, buf.len() as _) };
+        if n < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(n as _)
     }
 }
 
