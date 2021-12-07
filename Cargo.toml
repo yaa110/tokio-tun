@@ -1,6 +1,6 @@
 [package]
 name = "tokio-tun"
-version = "0.4.0"
+version = "0.5.0"
 authors = ["Navid <yaa110@gmail.com>"]
 edition = "2021"
 homepage = "https://github.com/yaa110/tokio-tun"
@@ -13,10 +13,10 @@ categories = ["asynchronous", "network-programming"]
 keywords = ["tun", "tap", "async", "tokio"]
 
 [dependencies]
-tokio = { version = "1.12", features = ["net"] }
+tokio = { version = "1.14", features = ["net"] }
 libc = "0.2"
 nix = "0.23"
 futures = "0.3"
 
 [dev-dependencies]
-tokio = { version = "1.12", features = ["full"] }
+tokio = { version = "1.14", features = ["full"] }
