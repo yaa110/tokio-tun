@@ -166,6 +166,11 @@ impl Tun {
         self.io.get_ref().send(buf)
     }
 
+    /// Returns the MAC address for the device
+    pub fn mac(&self) -> Result<[u8; 6]> {
+        self.iface.mac(None)
+    }
+
     /// Returns the name of Tun/Tap device.
     pub fn name(&self) -> &str {
         self.iface.name()

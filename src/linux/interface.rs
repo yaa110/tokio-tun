@@ -50,9 +50,6 @@ impl Interface {
     }
 
     pub fn init(&self, params: Params) -> Result<()> {
-        if let Some(mac) = params.mac {
-            self.mac(Some(mac))?;
-        }
         if let Some(mtu) = params.mtu {
             self.mtu(Some(mtu))?;
         }
@@ -77,8 +74,14 @@ impl Interface {
         if params.persist {
             self.persist()?;
         }
+        if let Some(mac) = params.mac {
+            self.mac(Some(mac))?;
+        }
         if params.up {
             self.flags(Some(libc::IFF_UP as i16 | libc::IFF_RUNNING as i16))?;
+        }
+        if let Some(mac) = params.mac {
+            self.mac(Some(mac))?;
         }
         Ok(())
     }
@@ -95,7 +98,7 @@ impl Interface {
         let mut req = ifreq::new(self.name());
         if let Some(mac) = mac {
             unsafe {
-                req.ifr_ifru.ifru_hwaddr.sa_family = libc::AF_UNIX as _;
+                req.ifr_ifru.ifru_hwaddr.sa_family = libc::ARPHRD_ETHER as _;
                 let h = &mut req.ifr_ifru.ifru_hwaddr.sa_data;
                 for n in 0..6 { h[n] = mac[n] as i8; }
                 for n in 6..14 { h[n] = 0i8; }
