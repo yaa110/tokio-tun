@@ -15,6 +15,7 @@ nix::ioctl_write_ptr_bad!(siocsifaddr, libc::SIOCSIFADDR, ifreq);
 nix::ioctl_write_ptr_bad!(siocsifdstaddr, libc::SIOCSIFDSTADDR, ifreq);
 nix::ioctl_write_ptr_bad!(siocsifbrdaddr, libc::SIOCSIFBRDADDR, ifreq);
 nix::ioctl_write_ptr_bad!(siocsifnetmask, libc::SIOCSIFNETMASK, ifreq);
+nix::ioctl_write_ptr_bad!(siocsifhwaddr, libc::SIOCSIFHWADDR, ifreq);
 
 nix::ioctl_read_bad!(siocgifmtu, libc::SIOCGIFMTU, ifreq);
 nix::ioctl_read_bad!(siocgifflags, libc::SIOCGIFFLAGS, ifreq);
@@ -22,6 +23,7 @@ nix::ioctl_read_bad!(siocgifaddr, libc::SIOCGIFADDR, ifreq);
 nix::ioctl_read_bad!(siocgifdstaddr, libc::SIOCGIFDSTADDR, ifreq);
 nix::ioctl_read_bad!(siocgifbrdaddr, libc::SIOCGIFBRDADDR, ifreq);
 nix::ioctl_read_bad!(siocgifnetmask, libc::SIOCGIFNETMASK, ifreq);
+nix::ioctl_read_bad!(siocgifhwaddr, libc::SIOCGIFHWADDR, ifreq);
 
 #[derive(Clone)]
 pub struct Interface {
@@ -48,6 +50,9 @@ impl Interface {
     }
 
     pub fn init(&self, params: Params) -> Result<()> {
+        if let Some(mac) = params.mac {
+            self.mac(Some(mac))?;
+        }
         if let Some(mtu) = params.mtu {
             self.mtu(Some(mtu))?;
         }
@@ -84,6 +89,27 @@ impl Interface {
 
     pub fn name(&self) -> &str {
         self.name.as_str()
+    }
+
+    pub fn mac(&self, mac: Option<[u8; 6]>) -> Result<[u8; 6]> {
+        let mut req = ifreq::new(self.name());
+        if let Some(mac) = mac {
+            unsafe {
+                req.ifr_ifru.ifru_hwaddr.sa_family = libc::AF_UNIX as _;
+                let h = &mut req.ifr_ifru.ifru_hwaddr.sa_data;
+                for n in 0..6 { h[n] = mac[n] as i8; }
+                for n in 6..14 { h[n] = 0i8; }
+                siocsifhwaddr(self.socket, &req)?;
+            }
+        } else {
+            unsafe { siocgifhwaddr(self.socket, &mut req) }?;
+        }
+        let mac = unsafe {
+            let h = req.ifr_ifru.ifru_hwaddr.sa_data;
+            [ h[0] as u8, h[1] as u8, h[2] as u8, h[3] as u8, h[4] as u8, h[5] as u8 ]
+        };
+        
+        Ok(mac)
     }
 
     pub fn mtu(&self, mtu: Option<i32>) -> Result<i32> {

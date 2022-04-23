@@ -21,6 +21,7 @@ pub struct TunBuilder<'a> {
     destination: Option<Ipv4Addr>,
     broadcast: Option<Ipv4Addr>,
     netmask: Option<Ipv4Addr>,
+    mac: Option<[u8; 6]>,
 }
 
 impl<'a> Default for TunBuilder<'a> {
@@ -38,6 +39,7 @@ impl<'a> Default for TunBuilder<'a> {
             destination: None,
             broadcast: None,
             netmask: None,
+            mac: None,
         }
     }
 }
@@ -113,6 +115,14 @@ impl<'a> TunBuilder<'a> {
     /// This includes routing via this address.
     pub fn address(mut self, address: Ipv4Addr) -> Self {
         self.address = Some(address);
+        self
+    }
+
+    /// Sets hardware address of device.
+    ///
+    /// This is a MAC address
+    pub fn mac(mut self, mac: [u8; 6]) -> Self {
+        self.mac = Some(mac);
         self
     }
 
@@ -201,6 +211,7 @@ impl<'a> From<TunBuilder<'a>> for Params {
             destination: builder.destination,
             broadcast: builder.broadcast,
             netmask: builder.netmask,
+            mac: None,
         }
     }
 
