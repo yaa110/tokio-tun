@@ -15,7 +15,7 @@ keywords = ["tun", "tap", "async", "tokio"]
 [dependencies]
 tokio = { version = "1.18", features = ["net"] }
 libc = "0.2"
-nix = "0.24"
+nix = { version = "0.24", default-features = false, features = ["ioctl"] }
 futures = "0.3"
 
 [dev-dependencies]
