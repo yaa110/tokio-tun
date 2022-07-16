@@ -37,13 +37,13 @@ impl Interface {
             flags |= libc::IFF_MULTI_QUEUE as i16;
         }
         req.ifr_ifru.ifru_flags = flags;
-        for fd in fds.iter() {
-            unsafe { tunsetiff(*fd, &req as *const _ as _) }?;
+        for &fd in &fds {
+            unsafe { tunsetiff(fd, &req as *const _ as _) }?;
         }
         Ok(Interface {
             fds,
             socket: unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) },
-            name: req.name(),
+            name: req.name().to_owned(),
         })
     }
 
@@ -79,7 +79,7 @@ impl Interface {
     }
 
     pub fn files(&self) -> &[i32] {
-        self.fds.as_slice()
+        &self.fds
     }
 
     pub fn name(&self) -> &str {
