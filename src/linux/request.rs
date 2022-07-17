@@ -62,6 +62,9 @@ impl ifreq {
         let mut req: ifreq = unsafe { mem::zeroed() };
         if !name.is_empty() {
             let len = name.len().min(IFNAMSIZ as usize - 1);
+            // Done just to make sure we don't truncate
+            // on an UTF-8 code point boundary.
+            let name = &name[..len];
             unsafe {
                 ptr::copy_nonoverlapping(
                     name.as_ptr().cast::<i8>(),
