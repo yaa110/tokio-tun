@@ -2,7 +2,6 @@ use crate::linux::interface::Interface;
 use crate::linux::io::TunIo;
 use crate::linux::params::Params;
 use crate::result::Result;
-use futures::ready;
 use std::io;
 use std::io::{Read, Write};
 use std::net::Ipv4Addr;
@@ -12,6 +11,16 @@ use std::sync::Arc;
 use std::task::{self, Context, Poll};
 use tokio::io::unix::AsyncFd;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+
+// Taken from the `futures` crate
+macro_rules! ready {
+    ($e:expr $(,)?) => {
+        match $e {
+            std::task::Poll::Ready(t) => t,
+            std::task::Poll::Pending => return std::task::Poll::Pending,
+        }
+    };
+}
 
 /// Represents a Tun/Tap device. Use [`TunBuilder`](struct.TunBuilder.html) to create a new instance of [`Tun`](struct.Tun.html).
 pub struct Tun {
