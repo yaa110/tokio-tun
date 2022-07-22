@@ -3,7 +3,7 @@
 #![allow(non_snake_case)]
 #![allow(dead_code)]
 
-use std::mem;
+use std::{ffi::CStr, mem, ptr, str};
 
 const IFNAMSIZ: u32 = 16;
 
@@ -61,26 +61,24 @@ impl ifreq {
     pub fn new(name: &str) -> Self {
         let mut req: ifreq = unsafe { mem::zeroed() };
         if !name.is_empty() {
-            let mut ifname: [::std::os::raw::c_char; IFNAMSIZ as _] = [0; IFNAMSIZ as _];
-            for (i, c) in name.as_bytes().iter().enumerate() {
-                if i > ifname.len() - 1 {
-                    break;
-                }
-                ifname[i] = *c as _;
+            let len = name.len().min(IFNAMSIZ as usize - 1);
+            // Done just to make sure we don't truncate
+            // on an UTF-8 code point boundary.
+            let name = &name[..len];
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    name.as_ptr().cast::<i8>(),
+                    req.ifr_ifrn.ifrn_name.as_mut_ptr(),
+                    len,
+                );
             }
-            req.ifr_ifrn.ifrn_name = ifname;
         }
         req
     }
 
-    pub fn name(&self) -> String {
-        let mut name = String::new();
-        for i in 0..IFNAMSIZ as _ {
-            let c = unsafe { self.ifr_ifrn.ifrn_name }[i] as u8 as char;
-            if c != '\0' {
-                name.push(c)
-            }
+    pub fn name(&self) -> &str {
+        unsafe {
+            str::from_utf8_unchecked(CStr::from_ptr(self.ifr_ifrn.ifrn_name.as_ptr()).to_bytes())
         }
-        name
     }
 }

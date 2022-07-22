@@ -2,7 +2,6 @@ use crate::linux::interface::Interface;
 use crate::linux::io::TunIo;
 use crate::linux::params::Params;
 use crate::result::Result;
-use std::ffi::CString;
 use std::io;
 use std::io::{Read, Write};
 use std::net::Ipv4Addr;
@@ -42,12 +41,15 @@ impl AsyncRead for Tun {
         buf: &mut ReadBuf<'_>,
     ) -> task::Poll<io::Result<()>> {
         let self_mut = self.get_mut();
-        let mut b = vec![0; buf.capacity()];
         loop {
             let mut guard = ready!(self_mut.io.poll_read_ready_mut(cx))?;
 
-            match guard.try_io(|inner| inner.get_mut().read(&mut b)) {
-                Ok(n) => return Poll::Ready(n.map(|n| buf.put_slice(&b[..n]))),
+            match guard.try_io(|inner| inner.get_mut().read(buf.initialize_unfilled())) {
+                Ok(Ok(n)) => {
+                    buf.set_filled(buf.filled().len() + n);
+                    return Poll::Ready(Ok(()));
+                }
+                Ok(Err(err)) => return Poll::Ready(Err(err)),
                 Err(_) => continue,
             }
         }
@@ -103,9 +105,8 @@ impl Tun {
     pub(crate) fn new_mq(params: Params, queues: usize) -> Result<Vec<Self>> {
         let iface = Self::allocate(params, queues)?;
         let mut tuns = Vec::with_capacity(queues);
-        let files = iface.files().to_vec();
         let iface = Arc::new(iface);
-        for fd in files.into_iter() {
+        for &fd in iface.files() {
             tuns.push(Self {
                 iface: iface.clone(),
                 io: AsyncFd::new(TunIo::from(fd))?,
@@ -115,11 +116,14 @@ impl Tun {
     }
 
     fn allocate(params: Params, queues: usize) -> Result<Interface> {
-        let mut fds = Vec::with_capacity(queues);
-        let path = CString::new("/dev/net/tun")?;
-        for _ in 0..queues {
-            fds.push(unsafe { libc::open(path.as_ptr(), libc::O_RDWR | libc::O_NONBLOCK) });
-        }
+        static TUN: &[u8] = b"/dev/net/tun\0";
+
+        let fds = (0..queues)
+            .map(|_| unsafe {
+                libc::open(TUN.as_ptr().cast::<i8>(), libc::O_RDWR | libc::O_NONBLOCK)
+            })
+            .collect::<Vec<_>>();
+
         let iface = Interface::new(
             fds,
             params.name.as_deref().unwrap_or_default(),
