@@ -120,7 +120,10 @@ impl Tun {
 
         let fds = (0..queues)
             .map(|_| unsafe {
-                libc::open(TUN.as_ptr().cast::<i8>(), libc::O_RDWR | libc::O_NONBLOCK)
+                libc::open(
+                    TUN.as_ptr().cast::<::std::os::raw::c_char>(),
+                    libc::O_RDWR | libc::O_NONBLOCK,
+                )
             })
             .collect::<Vec<_>>();
 

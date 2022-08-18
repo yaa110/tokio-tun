@@ -67,7 +67,7 @@ impl ifreq {
             let name = &name[..len];
             unsafe {
                 ptr::copy_nonoverlapping(
-                    name.as_ptr().cast::<i8>(),
+                    name.as_ptr().cast::<::std::os::raw::c_char>(),
                     req.ifr_ifrn.ifrn_name.as_mut_ptr(),
                     len,
                 );
