@@ -5,6 +5,7 @@ use crate::result::Result;
 use std::io;
 use std::io::{Read, Write};
 use std::net::Ipv4Addr;
+use std::os::raw::c_char;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -121,7 +122,7 @@ impl Tun {
         let fds = (0..queues)
             .map(|_| unsafe {
                 libc::open(
-                    TUN.as_ptr().cast::<::std::os::raw::c_char>(),
+                    TUN.as_ptr().cast::<c_char>(),
                     libc::O_RDWR | libc::O_NONBLOCK,
                 )
             })

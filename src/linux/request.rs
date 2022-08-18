@@ -3,6 +3,7 @@
 #![allow(non_snake_case)]
 #![allow(dead_code)]
 
+use std::os::raw::{c_char, c_int, c_short, c_uchar, c_ulong, c_ushort};
 use std::{ffi::CStr, mem, ptr, str};
 
 const IFNAMSIZ: u32 = 16;
@@ -17,7 +18,7 @@ pub struct ifreq {
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub union ifreq_ifrn {
-    pub ifrn_name: [::std::os::raw::c_char; 16usize],
+    pub ifrn_name: [c_char; 16usize],
     align: [u8; 16usize],
 }
 
@@ -29,32 +30,32 @@ pub union ifreq_ifru {
     pub ifru_broadaddr: sockaddr,
     pub ifru_netmask: sockaddr,
     pub ifru_hwaddr: sockaddr,
-    pub ifru_flags: ::std::os::raw::c_short,
-    pub ifru_ivalue: ::std::os::raw::c_int,
-    pub ifru_mtu: ::std::os::raw::c_int,
+    pub ifru_flags: c_short,
+    pub ifru_ivalue: c_int,
+    pub ifru_mtu: c_int,
     pub ifru_map: ifmap,
-    pub ifru_slave: [::std::os::raw::c_char; 16usize],
-    pub ifru_newname: [::std::os::raw::c_char; 16usize],
-    pub ifru_data: *mut ::std::os::raw::c_char,
+    pub ifru_slave: [c_char; 16usize],
+    pub ifru_newname: [c_char; 16usize],
+    pub ifru_data: *mut c_char,
     align: [u64; 3usize],
 }
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct sockaddr {
-    pub sa_family: ::std::os::raw::c_ushort,
-    pub sa_data: [::std::os::raw::c_char; 14usize],
+    pub sa_family: c_ushort,
+    pub sa_data: [c_char; 14usize],
 }
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct ifmap {
-    pub mem_start: ::std::os::raw::c_ulong,
-    pub mem_end: ::std::os::raw::c_ulong,
-    pub base_addr: ::std::os::raw::c_ushort,
-    pub irq: ::std::os::raw::c_uchar,
-    pub dma: ::std::os::raw::c_uchar,
-    pub port: ::std::os::raw::c_uchar,
+    pub mem_start: c_ulong,
+    pub mem_end: c_ulong,
+    pub base_addr: c_ushort,
+    pub irq: c_uchar,
+    pub dma: c_uchar,
+    pub port: c_uchar,
 }
 
 impl ifreq {
@@ -67,7 +68,7 @@ impl ifreq {
             let name = &name[..len];
             unsafe {
                 ptr::copy_nonoverlapping(
-                    name.as_ptr().cast::<::std::os::raw::c_char>(),
+                    name.as_ptr().cast::<c_char>(),
                     req.ifr_ifrn.ifrn_name.as_mut_ptr(),
                     len,
                 );
