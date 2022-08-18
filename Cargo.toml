@@ -1,6 +1,6 @@
 [package]
 name = "tokio-tun"
-version = "0.6.1"
+version = "0.7.0"
 authors = ["Navid <yaa110@gmail.com>"]
 edition = "2021"
 homepage = "https://github.com/yaa110/tokio-tun"
