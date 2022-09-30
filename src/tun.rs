@@ -6,7 +6,7 @@ use std::io;
 use std::io::{Read, Write};
 use std::net::Ipv4Addr;
 use std::os::raw::c_char;
-use std::os::unix::io::{AsRawFd, RawFd};
+use std::os::unix::io::{AsRawFd, IntoRawFd, RawFd};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{self, Context, Poll};
@@ -26,7 +26,7 @@ macro_rules! ready {
 /// Represents a Tun/Tap device. Use [`TunBuilder`](struct.TunBuilder.html) to create a new instance of [`Tun`](struct.Tun.html).
 pub struct Tun {
     iface: Arc<Interface>,
-    io: AsyncFd<TunIo>,
+    io: TunQueue,
 }
 
 impl AsRawFd for Tun {
@@ -41,19 +41,7 @@ impl AsyncRead for Tun {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> task::Poll<io::Result<()>> {
-        let self_mut = self.get_mut();
-        loop {
-            let mut guard = ready!(self_mut.io.poll_read_ready_mut(cx))?;
-
-            match guard.try_io(|inner| inner.get_mut().read(buf.initialize_unfilled())) {
-                Ok(Ok(n)) => {
-                    buf.set_filled(buf.filled().len() + n);
-                    return Poll::Ready(Ok(()));
-                }
-                Ok(Err(err)) => return Poll::Ready(Err(err)),
-                Err(_) => continue,
-            }
-        }
+        Pin::new(&mut self.get_mut().io).poll_read(cx, buf)
     }
 }
 
@@ -63,31 +51,15 @@ impl AsyncWrite for Tun {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> task::Poll<io::Result<usize>> {
-        let self_mut = self.get_mut();
-        loop {
-            let mut guard = ready!(self_mut.io.poll_write_ready_mut(cx))?;
-
-            match guard.try_io(|inner| inner.get_mut().write(buf)) {
-                Ok(result) => return Poll::Ready(result),
-                Err(_would_block) => continue,
-            }
-        }
+        Pin::new(&mut self.get_mut().io).poll_write(cx, buf)
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> task::Poll<io::Result<()>> {
-        let self_mut = self.get_mut();
-        loop {
-            let mut guard = ready!(self_mut.io.poll_write_ready_mut(cx))?;
-
-            match guard.try_io(|inner| inner.get_mut().flush()) {
-                Ok(result) => return Poll::Ready(result),
-                Err(_) => continue,
-            }
-        }
+        Pin::new(&mut self.get_mut().io).poll_flush(cx)
     }
 
-    fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> task::Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> task::Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().io).poll_shutdown(cx)
     }
 }
 
@@ -98,7 +70,7 @@ impl Tun {
         let fd = iface.files()[0];
         Ok(Self {
             iface: Arc::new(iface),
-            io: AsyncFd::new(TunIo::from(fd))?,
+            io: TunQueue::new(fd)?,
         })
     }
 
@@ -110,7 +82,7 @@ impl Tun {
         for &fd in iface.files() {
             tuns.push(Self {
                 iface: iface.clone(),
-                io: AsyncFd::new(TunIo::from(fd))?,
+                io: TunQueue::new(fd)?,
             })
         }
         Ok(tuns)
@@ -141,28 +113,14 @@ impl Tun {
     ///
     /// This method takes &self, so it is possible to call this method concurrently with other methods on this struct.
     pub async fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
-        loop {
-            let mut guard = self.io.readable().await?;
-
-            match guard.try_io(|inner| inner.get_ref().recv(buf)) {
-                Ok(res) => return res,
-                Err(_) => continue,
-            }
-        }
+        self.io.recv(buf).await
     }
 
     /// Sends a packet to the Tun/Tap interface
     ///
     /// This method takes &self, so it is possible to call this method concurrently with other methods on this struct.
     pub async fn send(&self, buf: &[u8]) -> io::Result<usize> {
-        loop {
-            let mut guard = self.io.writable().await?;
-
-            match guard.try_io(|inner| inner.get_ref().send(buf)) {
-                Ok(res) => return res,
-                Err(_) => continue,
-            }
-        }
+        self.io.send(buf).await
     }
 
     /// Try to receive a packet from the Tun/Tap interface
@@ -171,7 +129,7 @@ impl Tun {
     ///
     /// This method takes &self, so it is possible to call this method concurrently with other methods on this struct.
     pub fn try_recv(&self, buf: &mut [u8]) -> io::Result<usize> {
-        self.io.get_ref().recv(buf)
+        self.io.try_recv(buf)
     }
 
     /// Try to send a packet to the Tun/Tap interface
@@ -180,7 +138,7 @@ impl Tun {
     ///
     /// This method takes &self, so it is possible to call this method concurrently with other methods on this struct.
     pub fn try_send(&self, buf: &[u8]) -> io::Result<usize> {
-        self.io.get_ref().send(buf)
+        self.io.try_send(buf)
     }
 
     /// Returns the name of Tun/Tap device.
@@ -216,5 +174,134 @@ impl Tun {
     /// Returns the flags of MTU.
     pub fn flags(&self) -> Result<i16> {
         self.iface.flags(None)
+    }
+}
+
+/// Represents a queue of a Tun/Tap device.
+pub struct TunQueue(AsyncFd<TunIo>);
+
+impl IntoRawFd for TunQueue {
+    fn into_raw_fd(self) -> RawFd {
+        self.0.into_inner().into_raw_fd()
+    }
+}
+
+impl AsRawFd for TunQueue {
+    fn as_raw_fd(&self) -> RawFd {
+        self.0.as_raw_fd()
+    }
+}
+
+impl From<Tun> for TunQueue {
+    fn from(tun: Tun) -> Self {
+        tun.io
+    }
+}
+
+impl AsyncRead for TunQueue {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> task::Poll<io::Result<()>> {
+        let self_mut = self.get_mut();
+        loop {
+            let mut guard = ready!(self_mut.0.poll_read_ready_mut(cx))?;
+
+            match guard.try_io(|inner| inner.get_mut().read(buf.initialize_unfilled())) {
+                Ok(Ok(n)) => {
+                    buf.set_filled(buf.filled().len() + n);
+                    return Poll::Ready(Ok(()));
+                }
+                Ok(Err(err)) => return Poll::Ready(Err(err)),
+                Err(_) => continue,
+            }
+        }
+    }
+}
+
+impl AsyncWrite for TunQueue {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> task::Poll<io::Result<usize>> {
+        let self_mut = self.get_mut();
+        loop {
+            let mut guard = ready!(self_mut.0.poll_write_ready_mut(cx))?;
+
+            match guard.try_io(|inner| inner.get_mut().write(buf)) {
+                Ok(result) => return Poll::Ready(result),
+                Err(_would_block) => continue,
+            }
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> task::Poll<io::Result<()>> {
+        let self_mut = self.get_mut();
+        loop {
+            let mut guard = ready!(self_mut.0.poll_write_ready_mut(cx))?;
+
+            match guard.try_io(|inner| inner.get_mut().flush()) {
+                Ok(result) => return Poll::Ready(result),
+                Err(_) => continue,
+            }
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> task::Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl TunQueue {
+    pub fn new<T: AsRawFd>(inner: T) -> io::Result<Self> {
+        Ok(TunQueue(AsyncFd::new(TunIo::from(inner.as_raw_fd()))?))
+    }
+
+    /// Receives a packet from the Tun/Tap interface
+    ///
+    /// This method takes &self, so it is possible to call this method concurrently with other methods on this struct.
+    pub async fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
+        loop {
+            let mut guard = self.0.readable().await?;
+
+            match guard.try_io(|inner| inner.get_ref().recv(buf)) {
+                Ok(res) => return res,
+                Err(_) => continue,
+            }
+        }
+    }
+
+    /// Sends a packet to the Tun/Tap interface
+    ///
+    /// This method takes &self, so it is possible to call this method concurrently with other methods on this struct.
+    pub async fn send(&self, buf: &[u8]) -> io::Result<usize> {
+        loop {
+            let mut guard = self.0.writable().await?;
+
+            match guard.try_io(|inner| inner.get_ref().send(buf)) {
+                Ok(res) => return res,
+                Err(_) => continue,
+            }
+        }
+    }
+
+    /// Try to receive a packet from the Tun/Tap interface
+    ///
+    /// When there is no pending data, `Err(io::ErrorKind::WouldBlock)` is returned.
+    ///
+    /// This method takes &self, so it is possible to call this method concurrently with other methods on this struct.
+    pub fn try_recv(&self, buf: &mut [u8]) -> io::Result<usize> {
+        self.0.get_ref().recv(buf)
+    }
+
+    /// Try to send a packet to the Tun/Tap interface
+    ///
+    /// When the socket buffer is full, `Err(io::ErrorKind::WouldBlock)` is returned.
+    ///
+    /// This method takes &self, so it is possible to call this method concurrently with other methods on this struct.
+    pub fn try_send(&self, buf: &[u8]) -> io::Result<usize> {
+        self.0.get_ref().send(buf)
     }
 }
