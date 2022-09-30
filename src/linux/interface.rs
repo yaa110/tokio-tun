@@ -31,9 +31,9 @@ pub struct Interface {
 }
 
 impl Interface {
-    pub fn new(fds: Vec<i32>, name: &str, mut flags: i16) -> Result<Self> {
+    pub fn new(fds: Vec<i32>, name: &str, mut flags: i16, multi_queue: bool) -> Result<Self> {
         let mut req = ifreq::new(name);
-        if fds.len() > 1 {
+        if multi_queue {
             flags |= libc::IFF_MULTI_QUEUE as i16;
         }
         req.ifr_ifru.ifru_flags = flags;
