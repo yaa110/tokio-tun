@@ -193,6 +193,10 @@ impl Tun {
         self.iface.mtu(None)
     }
 
+    pub fn mac_address(&self) -> Result<[u8; 6]> {
+        Ok(self.iface.mac_address(None)?.into())
+    }
+
     /// Returns the IPv4 address of MTU.
     pub fn address(&self) -> Result<Ipv4Addr> {
         self.iface.address(None)
