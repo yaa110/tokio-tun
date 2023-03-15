@@ -22,6 +22,11 @@ impl MACAddr {
         Self { data }
     }
 }
+impl Into<[u8; 6]> for MACAddr {
+    fn into(self) -> [u8; 6] {
+        self.data
+    }
+}
 
 
 fn hton(octets: [u8; 4]) -> u32 {
