@@ -113,8 +113,8 @@ impl<'a> TunBuilder<'a> {
     /// Sets MAC address of device.
     ///
     /// This manually specifies the MAC address that will be associated with the created device.
-    pub fn mac_address(mut self, address: MACAddr) -> Self {
-        self.mac_address = Some(address);
+    pub fn mac_address(mut self, address: [u8; 6]) -> Self {
+        self.mac_address = Some(MACAddr::new(address));
         self
     }
 

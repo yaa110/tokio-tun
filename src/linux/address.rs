@@ -17,6 +17,11 @@ pub trait MACAddrExt {
 pub struct MACAddr {
     data: [u8; 6],
 }
+impl MACAddr {
+    pub fn new(data: [u8; 6]) -> Self {
+        Self { data }
+    }
+}
 
 
 fn hton(octets: [u8; 4]) -> u32 {
