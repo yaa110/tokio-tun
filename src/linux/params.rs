@@ -1,6 +1,6 @@
 use std::net::Ipv4Addr;
 
-use super::address::MacAddr;
+use crate::MacAddr;
 
 /// Represents parameters for creating a new Tun/Tap device on Linux.
 #[cfg(target_os = "linux")]

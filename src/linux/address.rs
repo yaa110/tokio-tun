@@ -1,30 +1,11 @@
 use super::request::sockaddr;
+use crate::MacAddr;
 use std::mem;
 use std::net::Ipv4Addr;
 
 pub trait SockAddrExt {
     fn to_address(&self) -> sockaddr;
     fn from_address(sock: sockaddr) -> Self;
-}
-
-pub struct MacAddr([u8; 6]);
-
-impl MacAddr {
-    pub fn new(data: [u8; 6]) -> MacAddr {
-        MacAddr(data)
-    }
-}
-
-impl MacAddr {
-    pub fn octets(&self) -> [u8; 6] {
-        self.0
-    }
-}
-
-impl From<[u8; 6]> for MacAddr {
-  fn from(data: [u8; 6]) -> MacAddr {
-        MacAddr::new(data)
-    }
 }
 
 fn hton(octets: [u8; 4]) -> u32 {
@@ -59,10 +40,11 @@ impl SockAddrExt for Ipv4Addr {
 
 impl SockAddrExt for MacAddr {
     fn to_address(&self) -> sockaddr {
+        let octets = self.octets();
         let mut addr: sockaddr = unsafe { mem::zeroed() };
         addr.sa_family = libc::ARPHRD_ETHER;
         for i in 0..6 {
-            addr.sa_data[i] = self.0[i] as _;
+            addr.sa_data[i] = octets[i] as _;
         }
         addr
     }
@@ -72,6 +54,6 @@ impl SockAddrExt for MacAddr {
         for i in 0..6 {
             data[i] = sock.sa_data[i] as _;
         }
-        Self(data)
+        MacAddr::new(data)
     }
 }

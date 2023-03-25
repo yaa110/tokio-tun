@@ -9,8 +9,10 @@ mod linux {
 
 mod builder;
 mod tun;
+mod macaddr;
 
 pub mod result;
 
 pub use self::builder::TunBuilder;
 pub use self::tun::Tun;
+pub use self::macaddr::MacAddr;

@@ -1,5 +1,5 @@
 use super::result::Result;
-use crate::linux::address::MacAddr;
+use crate::MacAddr;
 #[cfg(target_os = "linux")]
 use crate::linux::params::Params;
 #[cfg(target_os = "linux")]

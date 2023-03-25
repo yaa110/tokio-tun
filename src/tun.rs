@@ -1,8 +1,8 @@
 use crate::linux::interface::Interface;
-use crate::linux::address::MacAddr;
 use crate::linux::io::TunIo;
 use crate::linux::params::Params;
 use crate::result::Result;
+use crate::MacAddr;
 use std::io;
 use std::io::{Read, Write};
 use std::net::Ipv4Addr;

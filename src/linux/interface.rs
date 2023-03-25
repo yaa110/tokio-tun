@@ -1,8 +1,8 @@
-use super::address::MacAddr;
 use super::params::Params;
 use super::request::ifreq;
 use crate::linux::address::SockAddrExt;
 use crate::result::Result;
+use crate::MacAddr;
 use std::net::Ipv4Addr;
 
 nix::ioctl_write_int!(tunsetiff, b'T', 202);
