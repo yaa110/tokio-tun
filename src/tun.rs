@@ -2,7 +2,6 @@ use crate::linux::interface::Interface;
 use crate::linux::io::TunIo;
 use crate::linux::params::Params;
 use crate::result::Result;
-use crate::MacAddr;
 use std::io;
 use std::io::{Read, Write};
 use std::net::Ipv4Addr;
@@ -194,8 +193,9 @@ impl Tun {
         self.iface.mtu(None)
     }
 
-    pub fn mac_address(&self) -> Result<MacAddr> {
-        self.iface.mac_address(None)
+    pub fn mac_address(&self) -> Result<[u8; 6]> {
+        let mac = self.iface.mac_address(None)?;
+        Ok(mac.octets())
     }
 
     /// Returns the IPv4 address of MTU.

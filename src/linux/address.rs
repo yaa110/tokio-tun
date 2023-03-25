@@ -1,7 +1,26 @@
 use super::request::sockaddr;
-use crate::MacAddr;
 use std::mem;
 use std::net::Ipv4Addr;
+
+pub struct MacAddr([u8; 6]);
+
+impl MacAddr {
+    pub fn new(data: [u8; 6]) -> MacAddr {
+        MacAddr(data)
+    }
+}
+
+impl MacAddr {
+    pub fn octets(&self) -> [u8; 6] {
+        self.0
+    }
+}
+
+impl From<[u8; 6]> for MacAddr {
+  fn from(data: [u8; 6]) -> MacAddr {
+        MacAddr::new(data)
+    }
+}
 
 pub trait SockAddrExt {
     fn to_address(&self) -> sockaddr;

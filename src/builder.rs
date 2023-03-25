@@ -1,6 +1,6 @@
 use super::result::Result;
-use crate::MacAddr;
 #[cfg(target_os = "linux")]
+use crate::linux::address::MacAddr;
 use crate::linux::params::Params;
 #[cfg(target_os = "linux")]
 use crate::tun::Tun;
@@ -113,8 +113,8 @@ impl<'a> TunBuilder<'a> {
     /// Sets MAC address of device.
     ///
     /// This manually specifies the MAC address that will be associated with the created device.
-    pub fn mac_address(mut self, mac: MacAddr) -> Self {
-        self.mac_address = Some(mac);
+    pub fn mac_address(mut self, mac: [u8; 6]) -> Self {
+        self.mac_address = Some(MacAddr::from(mac));
         self
     }
 
