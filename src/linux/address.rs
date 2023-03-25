@@ -56,7 +56,7 @@ impl SockAddrExt for MacAddr {
         let mut addr: sockaddr = unsafe { mem::zeroed() };
         addr.sa_family = libc::ARPHRD_ETHER;
         for i in 0..6 {
-            addr.sa_data[i] = self.0[i] as libc::c_char;
+            addr.sa_data[i] = self.0[i] as _;
         }
         addr
     }
