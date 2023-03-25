@@ -1,6 +1,7 @@
+use super::address::MacAddr;
 use super::params::Params;
 use super::request::ifreq;
-use crate::linux::address::Ipv4AddrExt;
+use crate::linux::address::SockAddrExt;
 use crate::result::Result;
 use std::net::Ipv4Addr;
 
@@ -15,6 +16,7 @@ nix::ioctl_write_ptr_bad!(siocsifaddr, libc::SIOCSIFADDR, ifreq);
 nix::ioctl_write_ptr_bad!(siocsifdstaddr, libc::SIOCSIFDSTADDR, ifreq);
 nix::ioctl_write_ptr_bad!(siocsifbrdaddr, libc::SIOCSIFBRDADDR, ifreq);
 nix::ioctl_write_ptr_bad!(siocsifnetmask, libc::SIOCSIFNETMASK, ifreq);
+nix::ioctl_write_ptr_bad!(siocsifhwaddr, libc::SIOCSIFHWADDR, ifreq);
 
 nix::ioctl_read_bad!(siocgifmtu, libc::SIOCGIFMTU, ifreq);
 nix::ioctl_read_bad!(siocgifflags, libc::SIOCGIFFLAGS, ifreq);
@@ -22,6 +24,7 @@ nix::ioctl_read_bad!(siocgifaddr, libc::SIOCGIFADDR, ifreq);
 nix::ioctl_read_bad!(siocgifdstaddr, libc::SIOCGIFDSTADDR, ifreq);
 nix::ioctl_read_bad!(siocgifbrdaddr, libc::SIOCGIFBRDADDR, ifreq);
 nix::ioctl_read_bad!(siocgifnetmask, libc::SIOCGIFNETMASK, ifreq);
+nix::ioctl_read_bad!(siocgifhwaddr, libc::SIOCGIFHWADDR, ifreq);
 
 #[derive(Clone)]
 pub struct Interface {
@@ -56,6 +59,9 @@ impl Interface {
         }
         if let Some(group) = params.group {
             self.group(group)?;
+        }
+        if let Some(mac_address) = params.mac_address {
+            self.mac_address(Some(mac_address))?;
         }
         if let Some(address) = params.address {
             self.address(Some(address))?;
@@ -106,6 +112,17 @@ impl Interface {
         }
         unsafe { siocgifnetmask(self.socket, &mut req) }?;
         Ok(unsafe { Ipv4Addr::from_address(req.ifr_ifru.ifru_netmask) })
+    }
+
+    pub fn mac_address(&self, mac: Option<MacAddr>) -> Result<MacAddr> {
+        let mut req = ifreq::new(self.name());
+        if let Some(mac) = mac {
+            req.ifr_ifru.ifru_hwaddr = mac.to_address();
+            unsafe { siocsifhwaddr(self.socket, &req) }?;
+            return Ok(mac);
+        }
+        unsafe { siocgifhwaddr(self.socket, &mut req) }?;
+        Ok(unsafe { MacAddr::from_address(req.ifr_ifru.ifru_hwaddr) })
     }
 
     pub fn address(&self, address: Option<Ipv4Addr>) -> Result<Ipv4Addr> {

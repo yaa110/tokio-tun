@@ -1,4 +1,5 @@
 use crate::linux::interface::Interface;
+use crate::linux::address::MacAddr;
 use crate::linux::io::TunIo;
 use crate::linux::params::Params;
 use crate::result::Result;
@@ -191,6 +192,10 @@ impl Tun {
     /// Returns the value of MTU.
     pub fn mtu(&self) -> Result<i32> {
         self.iface.mtu(None)
+    }
+
+    pub fn mac_address(&self) -> Result<MacAddr> {
+        self.iface.mac_address(None)
     }
 
     /// Returns the IPv4 address of MTU.
