@@ -7,17 +7,23 @@ pub trait SockAddrExt {
     fn from_address(sock: sockaddr) -> Self;
 }
 
-pub struct MacAddr(pub [u8; 6]);
+pub struct MacAddr([u8; 6]);
 
 impl MacAddr {
-    pub fn new(a: u8, b: u8, c: u8, d: u8, e: u8, f: u8) -> Self {
-        Self([a, b, c, d, e, f])
+    pub fn new(data: [u8; 6]) -> MacAddr {
+        MacAddr(data)
+    }
+}
+
+impl MacAddr {
+    pub fn octets(&self) -> [u8; 6] {
+        self.0
     }
 }
 
 impl From<[u8; 6]> for MacAddr {
   fn from(data: [u8; 6]) -> MacAddr {
-        MacAddr(data)
+        MacAddr::new(data)
     }
 }
 
