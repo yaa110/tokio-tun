@@ -11,4 +11,4 @@ mod builder;
 mod tun;
 
 pub use self::builder::TunBuilder;
-pub use self::tun::Tun;
+pub use self::tun::{Tun, TunQueue};
