@@ -6,12 +6,12 @@ Asynchronous allocation of TUN/TAP devices in Rust using [`tokio`](https://crate
 
 ## Getting Started
 
-- Create a tun device using `TunBuilder` and read from it in a loop:
+- Create a tun device using `Tun::builder()` and read from it in a loop:
 
 ```rust
 #[tokio::main]
 async fn main() -> Result<()> {
-    let tun = TunBuilder::new()
+    let tun = Tun::builder()
         .name("")            // if name is empty, then it is set by kernel.
         .tap(false)          // false (default): TUN, true: TAP.
         .packet_info(false)  // false: IFF_NO_PI, default is true.
@@ -33,26 +33,26 @@ async fn main() -> Result<()> {
 - Run the code using `sudo`:
 
 ```bash
-➜  sudo -E /path/to/cargo run
+sudo -E $(which cargo) run
 ```
 
 - Set the address of device (address and netmask could also be set using `TunBuilder`):
 
 ```bash
-➜  sudo ip a add 10.0.0.1/24 dev <tun-name>
+sudo ip a add 10.0.0.1/24 dev <tun-name>
 ```
 
 - Ping to read packets:
 
 ```bash
-➜  ping 10.0.0.2
+ping 10.0.0.2
 ```
 
 - Display devices and analyze the network traffic:
 
-```
-➜  ip tuntap
-➜  sudo tshark -i <tun-name>
+```bash
+ip tuntap
+sudo tshark -i <tun-name>
 ```
 
 ## Supported Platforms
@@ -68,3 +68,8 @@ async fn main() -> Result<()> {
 
 - [`read`](examples/read.rs): Split tun to (reader, writer) pair and read packets from reader.
 - [`read-mq`](examples/read-mq.rs): Read from multi-queue tun using `tokio::select!`.
+
+```bash
+sudo -E $(which cargo) run --example read
+sudo -E $(which cargo) run --example read-mq
+```

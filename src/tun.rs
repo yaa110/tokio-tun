@@ -1,7 +1,8 @@
 use crate::linux::interface::Interface;
 use crate::linux::io::TunIo;
 use crate::linux::params::Params;
-use crate::result::Result;
+use crate::TunBuilder;
+use anyhow::Result;
 use std::io;
 use std::io::{Read, Write};
 use std::net::Ipv4Addr;
@@ -92,6 +93,10 @@ impl AsyncWrite for Tun {
 }
 
 impl Tun {
+    pub fn builder() -> TunBuilder {
+        TunBuilder::new()
+    }
+
     /// Creates a new instance of Tun/Tap device.
     pub(crate) fn new(params: Params) -> Result<Self> {
         let iface = Self::allocate(params, 1)?;

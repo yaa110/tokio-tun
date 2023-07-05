@@ -1,12 +1,12 @@
+use anyhow::Result;
 use std::net::Ipv4Addr;
 use std::os::unix::io::AsRawFd;
 use tokio::io::AsyncReadExt;
-use tokio_tun::result::Result;
-use tokio_tun::TunBuilder;
+use tokio_tun::Tun;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let tun = TunBuilder::new()
+    let tun = Tun::builder()
         .name("")
         .tap(false)
         .packet_info(false)

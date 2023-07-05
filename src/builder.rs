@@ -1,15 +1,15 @@
-use super::result::Result;
 #[cfg(target_os = "linux")]
 use crate::linux::params::Params;
 #[cfg(target_os = "linux")]
 use crate::tun::Tun;
+use anyhow::Result;
 use core::convert::From;
 use libc::{IFF_NO_PI, IFF_TAP, IFF_TUN};
 use std::net::Ipv4Addr;
 
 /// Represents a factory to build new instances of [`Tun`](struct.Tun.html).
-pub struct TunBuilder<'a> {
-    name: &'a str,
+pub struct TunBuilder {
+    name: String,
     is_tap: bool,
     packet_info: bool,
     persist: bool,
@@ -23,10 +23,10 @@ pub struct TunBuilder<'a> {
     netmask: Option<Ipv4Addr>,
 }
 
-impl<'a> Default for TunBuilder<'a> {
+impl Default for TunBuilder {
     fn default() -> Self {
         Self {
-            name: "",
+            name: "".into(),
             owner: None,
             group: None,
             is_tap: false,
@@ -42,15 +42,15 @@ impl<'a> Default for TunBuilder<'a> {
     }
 }
 
-impl<'a> TunBuilder<'a> {
+impl TunBuilder {
     /// Creates a new instance of [`TunBuilder`](struct.TunBuilder.html).
     pub fn new() -> Self {
         Default::default()
     }
 
     /// Sets the name of device (max length: 16 characters), if it is empty, then device name is set by kernel. Default value is empty.
-    pub fn name(mut self, name: &'a str) -> Self {
-        self.name = name;
+    pub fn name(mut self, name: &str) -> Self {
+        self.name = name.into();
         self
     }
 
@@ -176,14 +176,14 @@ impl<'a> TunBuilder<'a> {
     }
 }
 
-impl<'a> From<TunBuilder<'a>> for Params {
+impl From<TunBuilder> for Params {
     #[cfg(target_os = "linux")]
     fn from(builder: TunBuilder) -> Self {
         Params {
             name: if builder.name.is_empty() {
                 None
             } else {
-                Some(builder.name.into())
+                Some(builder.name)
             },
             flags: {
                 let mut flags = if builder.is_tap { IFF_TAP } else { IFF_TUN } as _;
