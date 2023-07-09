@@ -1,7 +1,7 @@
 use super::params::Params;
 use super::request::ifreq;
 use crate::linux::address::Ipv4AddrExt;
-use anyhow::Result;
+use crate::Result;
 use std::net::Ipv4Addr;
 
 nix::ioctl_write_int!(tunsetiff, b'T', 202);

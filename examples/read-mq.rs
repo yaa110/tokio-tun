@@ -1,11 +1,10 @@
-use anyhow::Result;
 use std::net::Ipv4Addr;
 use std::os::unix::io::AsRawFd;
 use tokio::io::AsyncReadExt;
 use tokio_tun::Tun;
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() {
     let queues = 3;
 
     let tuns = Tun::builder()
@@ -18,7 +17,8 @@ async fn main() -> Result<()> {
         .destination(Ipv4Addr::new(10, 1, 0, 1))
         .broadcast(Ipv4Addr::BROADCAST)
         .netmask(Ipv4Addr::new(255, 255, 255, 0))
-        .try_build_mq(queues)?;
+        .try_build_mq(queues)
+        .unwrap();
 
     println!("--------------");
     println!("{} tuns created", queues);

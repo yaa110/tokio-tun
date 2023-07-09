@@ -8,7 +8,9 @@ mod linux {
 }
 
 mod builder;
+mod result;
 mod tun;
 
 pub use self::builder::TunBuilder;
+pub use self::result::{Error, Result};
 pub use self::tun::Tun;
