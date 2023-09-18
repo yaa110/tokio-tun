@@ -99,7 +99,7 @@ impl Tun {
 
     /// Creates a new instance of Tun/Tap device.
     pub(crate) fn new(params: Params) -> Result<Self> {
-        let iface = Self::allocate(params, 1)?;
+        let iface = Self::allocate(params, None)?;
         let fd = iface.files()[0];
         Ok(Self {
             iface: Arc::new(iface),
@@ -109,7 +109,7 @@ impl Tun {
 
     /// Creates a new instance of Tun/Tap device.
     pub(crate) fn new_mq(params: Params, queues: usize) -> Result<Vec<Self>> {
-        let iface = Self::allocate(params, queues)?;
+        let iface = Self::allocate(params, Some(queues))?;
         let mut tuns = Vec::with_capacity(queues);
         let iface = Arc::new(iface);
         for &fd in iface.files() {
@@ -121,10 +121,10 @@ impl Tun {
         Ok(tuns)
     }
 
-    fn allocate(params: Params, queues: usize) -> Result<Interface> {
+    fn allocate(params: Params, queues: Option<usize>) -> Result<Interface> {
         static TUN: &[u8] = b"/dev/net/tun\0";
 
-        let fds = (0..queues)
+        let fds = (0..queues.unwrap_or(1))
             .map(|_| unsafe {
                 libc::open(
                     TUN.as_ptr().cast::<c_char>(),
@@ -137,6 +137,7 @@ impl Tun {
             fds,
             params.name.as_deref().unwrap_or_default(),
             params.flags,
+            queues.is_some(),
         )?;
         iface.init(params)?;
         Ok(iface)
