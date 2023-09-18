@@ -14,4 +14,5 @@ pub struct Params {
     pub destination: Option<Ipv4Addr>,
     pub broadcast: Option<Ipv4Addr>,
     pub netmask: Option<Ipv4Addr>,
+    pub mac: Option<[u8; 6]>,
 }
