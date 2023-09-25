@@ -146,12 +146,17 @@ impl Tun {
     fn allocate(params: Params, queues: usize) -> Result<Interface> {
         let fds = (0..queues)
             .map(|_| unsafe {
-                libc::open(
+                let fd = libc::open(
                     TUN.as_ptr().cast::<c_char>(),
                     libc::O_RDWR | libc::O_NONBLOCK,
-                )
+                );
+                if fd < 0 {
+                    Err(std::io::Error::last_os_error().into())
+                } else {
+                    Ok(fd)
+                }
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>>>()?;
 
         let iface = Interface::new(
             fds,
