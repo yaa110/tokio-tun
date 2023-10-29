@@ -4,6 +4,7 @@ use crate::linux::params::Params;
 use crate::Result;
 use crate::TunBuilder;
 use std::io;
+use std::io::IoSlice;
 use std::io::{Read, Write};
 use std::net::Ipv4Addr;
 use std::os::raw::c_char;
@@ -75,6 +76,26 @@ impl AsyncWrite for Tun {
         }
     }
 
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<std::result::Result<usize, io::Error>> {
+        let self_mut = self.get_mut();
+        loop {
+            let mut guard = ready!(self_mut.io.poll_write_ready_mut(cx))?;
+
+            match guard.try_io(|inner| inner.get_mut().write_vectored(bufs)) {
+                Ok(result) => return Poll::Ready(result),
+                Err(_would_block) => continue,
+            }
+        }
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        true
+    }
+
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> task::Poll<io::Result<()>> {
         let self_mut = self.get_mut();
         loop {
@@ -142,7 +163,7 @@ impl Tun {
         Ok(iface)
     }
 
-    /// Receives a packet from the Tun/Tap interface
+    /// Receives a packet from the Tun/Tap interface.
     ///
     /// This method takes &self, so it is possible to call this method concurrently with other methods on this struct.
     pub async fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
@@ -156,7 +177,7 @@ impl Tun {
         }
     }
 
-    /// Sends a packet to the Tun/Tap interface
+    /// Sends a buffer to the Tun/Tap interface.
     ///
     /// This method takes &self, so it is possible to call this method concurrently with other methods on this struct.
     pub async fn send(&self, buf: &[u8]) -> io::Result<usize> {
@@ -170,7 +191,21 @@ impl Tun {
         }
     }
 
-    /// Try to receive a packet from the Tun/Tap interface
+    /// Sends several different buffers to the Tun/Tap interface.
+    ///
+    /// This method takes &self, so it is possible to call this method concurrently with other methods on this struct.
+    pub async fn send_vectored(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
+        loop {
+            let mut guard = self.io.writable().await?;
+
+            match guard.try_io(|inner| inner.get_ref().sendv(bufs)) {
+                Ok(res) => return res,
+                Err(_) => continue,
+            }
+        }
+    }
+
+    /// Tries to receive a buffer from the Tun/Tap interface.
     ///
     /// When there is no pending data, `Err(io::ErrorKind::WouldBlock)` is returned.
     ///
@@ -179,13 +214,22 @@ impl Tun {
         self.io.get_ref().recv(buf)
     }
 
-    /// Try to send a packet to the Tun/Tap interface
+    /// Tries to send a packet to the Tun/Tap interface.
     ///
     /// When the socket buffer is full, `Err(io::ErrorKind::WouldBlock)` is returned.
     ///
     /// This method takes &self, so it is possible to call this method concurrently with other methods on this struct.
     pub fn try_send(&self, buf: &[u8]) -> io::Result<usize> {
         self.io.get_ref().send(buf)
+    }
+
+    /// Tries to send several different buffers to the Tun/Tap interface.
+    ///
+    /// When the socket buffer is full, `Err(io::ErrorKind::WouldBlock)` is returned.
+    ///
+    /// This method takes &self, so it is possible to call this method concurrently with other methods on this struct.
+    pub fn try_send_vectored(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
+        self.io.get_ref().sendv(bufs)
     }
 
     /// Returns the name of Tun/Tap device.

@@ -1,5 +1,5 @@
 use std::convert::From;
-use std::io::{self, Read, Write};
+use std::io::{self, IoSlice, Read, Write};
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 
 pub struct TunIo(RawFd);
@@ -33,6 +33,10 @@ impl Write for TunIo {
         self.send(buf)
     }
 
+    fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
+        self.sendv(bufs)
+    }
+
     fn flush(&mut self) -> io::Result<()> {
         let ret = unsafe { libc::fsync(self.0) };
         if ret < 0 {
@@ -53,6 +57,21 @@ impl TunIo {
 
     pub fn send(&self, buf: &[u8]) -> io::Result<usize> {
         let n = unsafe { libc::write(self.0, buf.as_ptr() as *const _, buf.len() as _) };
+        if n < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(n as _)
+    }
+
+    pub fn sendv(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
+        let iov = bufs
+            .iter()
+            .map(|buf| libc::iovec {
+                iov_base: buf.as_ptr() as *mut _,
+                iov_len: buf.len() as _,
+            })
+            .collect::<Vec<_>>();
+        let n = unsafe { libc::writev(self.0, iov.as_ptr() as *const _, iov.len() as _) };
         if n < 0 {
             return Err(io::Error::last_os_error());
         }
