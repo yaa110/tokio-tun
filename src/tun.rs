@@ -3,9 +3,8 @@ use crate::linux::io::TunIo;
 use crate::linux::params::Params;
 use crate::Result;
 use crate::TunBuilder;
-use std::io;
-use std::io::IoSlice;
-use std::io::{Read, Write};
+use std::io::{self, ErrorKind, IoSlice, Read, Write};
+use std::mem;
 use std::net::Ipv4Addr;
 use std::os::raw::c_char;
 use std::os::unix::io::{AsRawFd, RawFd};
@@ -14,6 +13,8 @@ use std::sync::Arc;
 use std::task::{self, Context, Poll};
 use tokio::io::unix::AsyncFd;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+
+static TUN: &[u8] = b"/dev/net/tun\0";
 
 // Taken from the `futures` crate
 macro_rules! ready {
@@ -143,8 +144,6 @@ impl Tun {
     }
 
     fn allocate(params: Params, queues: usize) -> Result<Interface> {
-        static TUN: &[u8] = b"/dev/net/tun\0";
-
         let fds = (0..queues)
             .map(|_| unsafe {
                 libc::open(
@@ -169,7 +168,6 @@ impl Tun {
     pub async fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
         loop {
             let mut guard = self.io.readable().await?;
-
             match guard.try_io(|inner| inner.get_ref().recv(buf)) {
                 Ok(res) => return res,
                 Err(_) => continue,
@@ -177,13 +175,12 @@ impl Tun {
         }
     }
 
-    /// Sends a buffer to the Tun/Tap interface.
+    /// Sends a buffer to the Tun/Tap interface. Returns the number of bytes written to the device.
     ///
     /// This method takes &self, so it is possible to call this method concurrently with other methods on this struct.
     pub async fn send(&self, buf: &[u8]) -> io::Result<usize> {
         loop {
             let mut guard = self.io.writable().await?;
-
             match guard.try_io(|inner| inner.get_ref().send(buf)) {
                 Ok(res) => return res,
                 Err(_) => continue,
@@ -191,13 +188,29 @@ impl Tun {
         }
     }
 
-    /// Sends several different buffers to the Tun/Tap interface.
+    /// Sends all of a buffer to the Tun/Tap interface.
+    ///
+    /// This method takes &self, so it is possible to call this method concurrently with other methods on this struct.
+    pub async fn send_all(&self, buf: &[u8]) -> io::Result<()> {
+        let mut remaining = buf;
+        while !remaining.is_empty() {
+            match self.send(&remaining).await? {
+                0 => return Err(ErrorKind::WriteZero.into()),
+                n => {
+                    let (_, rest) = mem::take(&mut remaining).split_at(n);
+                    remaining = rest;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Sends several different buffers to the Tun/Tap interface. Returns the number of bytes written to the device.
     ///
     /// This method takes &self, so it is possible to call this method concurrently with other methods on this struct.
     pub async fn send_vectored(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
         loop {
             let mut guard = self.io.writable().await?;
-
             match guard.try_io(|inner| inner.get_ref().sendv(bufs)) {
                 Ok(res) => return res,
                 Err(_) => continue,
