@@ -1,6 +1,6 @@
 use std::net::Ipv4Addr;
 use std::os::unix::io::AsRawFd;
-use tokio::io::AsyncReadExt;
+use std::sync::Arc;
 use tokio_tun::Tun;
 
 #[tokio::main]
@@ -41,9 +41,9 @@ async fn main() {
     println!("---------------------");
 
     let mut tuns = tuns.into_iter();
-    let mut tun0 = tuns.next().unwrap();
-    let mut tun1 = tuns.next().unwrap();
-    let mut tun2 = tuns.next().unwrap();
+    let tun0 = Arc::new(tuns.next().unwrap());
+    let tun1 = Arc::new(tuns.next().unwrap());
+    let tun2 = Arc::new(tuns.next().unwrap());
 
     let mut buf0 = [0u8; 1024];
     let mut buf1 = [0u8; 1024];
@@ -51,9 +51,9 @@ async fn main() {
 
     loop {
         let (buf, id) = tokio::select! {
-            Ok(n) = tun0.read(&mut buf0) => (&buf0[..n], 0),
-            Ok(n) = tun1.read(&mut buf1) => (&buf1[..n], 1),
-            Ok(n) = tun2.read(&mut buf2) => (&buf2[..n], 2),
+            Ok(n) = tun0.recv(&mut buf0) => (&buf0[..n], 0),
+            Ok(n) = tun1.recv(&mut buf1) => (&buf1[..n], 1),
+            Ok(n) = tun2.recv(&mut buf2) => (&buf2[..n], 2),
         };
         println!("reading {} bytes from tuns[{}]: {:?}", buf.len(), id, buf);
     }
