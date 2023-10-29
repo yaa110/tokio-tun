@@ -194,7 +194,7 @@ impl Tun {
     pub async fn send_all(&self, buf: &[u8]) -> io::Result<()> {
         let mut remaining = buf;
         while !remaining.is_empty() {
-            match self.send(&remaining).await? {
+            match self.send(remaining).await? {
                 0 => return Err(ErrorKind::WriteZero.into()),
                 n => {
                     let (_, rest) = mem::take(&mut remaining).split_at(n);
