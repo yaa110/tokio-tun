@@ -10,11 +10,11 @@ license = "MIT OR Apache-2.0"
 name = "tokio-tun"
 readme = "README.md"
 repository = "https://github.com/yaa110/tokio-tun"
-version = "0.11.2"
+version = "0.11.3"
 
 [dependencies]
 libc = "0.2"
-nix = {version = "0.27", default-features = false, features = ["ioctl"]}
+nix = {version = "0.28", default-features = false, features = ["ioctl"]}
 thiserror = "1"
 tokio = {version = "1", features = ["net"]}
 
