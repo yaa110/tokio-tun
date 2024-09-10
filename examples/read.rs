@@ -8,8 +8,8 @@ async fn main() {
     let tun = Arc::new(
         Tun::builder()
             .name("")
-            .tap(false)
-            .packet_info(false)
+            .tap()
+            .packet_info()
             .mtu(1350)
             .up()
             .address(Ipv4Addr::new(10, 0, 0, 1))
@@ -21,7 +21,7 @@ async fn main() {
     );
 
     println!("-----------");
-    println!("tun created");
+    println!("tap created");
     println!("-----------");
 
     println!(

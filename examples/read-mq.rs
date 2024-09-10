@@ -9,8 +9,6 @@ async fn main() {
 
     let tuns = Tun::builder()
         .name("")
-        .tap(false)
-        .packet_info(false)
         .mtu(1350)
         .up()
         .address(Ipv4Addr::new(10, 0, 0, 1))

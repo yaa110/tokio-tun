@@ -33,7 +33,7 @@ impl Default for TunBuilder {
             persist: false,
             up: false,
             mtu: None,
-            packet_info: true,
+            packet_info: false,
             address: None,
             destination: None,
             broadcast: None,
@@ -61,8 +61,8 @@ impl TunBuilder {
     ///
     /// In contrast, *TUN* devices are layer 3 devices which means that IP packets are transmitted
     /// over it.
-    pub fn tap(mut self, is_tap: bool) -> Self {
-        self.is_tap = is_tap;
+    pub fn tap(mut self) -> Self {
+        self.is_tap = true;
         self
     }
 
@@ -74,8 +74,8 @@ impl TunBuilder {
     ///
     /// If you don't need this kind of information, you can set `packet_info` to false to only
     /// receive the raw packet (whatever it may be).
-    pub fn packet_info(mut self, packet_info: bool) -> Self {
-        self.packet_info = packet_info;
+    pub fn packet_info(mut self) -> Self {
+        self.packet_info = true;
         self
     }
 
