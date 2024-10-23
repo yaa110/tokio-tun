@@ -54,7 +54,7 @@ impl TunBuilder {
         self
     }
 
-    /// If `is_tap` is true, a TAP device is allocated, otherwise, a TUN device is created. Default value is `false`.
+    /// Allocates a TAP device. If not set, a TUN device is created.
     ///
     /// *TAP* devices are layer 2 devices which will result in ethernet frames (or other protocols)
     /// being transmitted over this device.
@@ -66,14 +66,15 @@ impl TunBuilder {
         self
     }
 
-    /// If `packet_info` is false, then `IFF_NO_PI` flag is set. Default value is `true`.
+    /// Set `packet_info` to `true` (default is `false`), thereby unsetting the `IFF_NO_PI` flag on
+    /// allocation.
     ///
     /// Instructing the kernel to provide packet information results in it adding 4 extra bytes to
     /// the beginning of the packet (2 flag bytes and 2 protocol bytes). These bytes tell you
     /// what kind of package was just delivered.
     ///
-    /// If you don't need this kind of information, you can set `packet_info` to false to only
-    /// receive the raw packet (whatever it may be).
+    /// If you don't need this kind of information, you do not need to set this option. In this
+    /// case, only raw packets (whatever they may be) are received.
     pub fn packet_info(mut self) -> Self {
         self.packet_info = true;
         self
