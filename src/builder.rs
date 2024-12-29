@@ -21,6 +21,7 @@ pub struct TunBuilder {
     destination: Option<Ipv4Addr>,
     broadcast: Option<Ipv4Addr>,
     netmask: Option<Ipv4Addr>,
+    queues: Option<usize>,
 }
 
 impl Default for TunBuilder {
@@ -38,6 +39,7 @@ impl Default for TunBuilder {
             destination: None,
             broadcast: None,
             netmask: None,
+            queues: None,
         }
     }
 }
@@ -63,6 +65,15 @@ impl TunBuilder {
     /// over it.
     pub fn tap(mut self) -> Self {
         self.is_tap = true;
+        self
+    }
+
+    /// Builds multiple instances of [`Tun`](struct.Tun.html) with `IFF_MULTI_QUEUE` flag.
+    ///
+    /// Internally this creates multiple file descriptors to parallelize packet sending and receiving.
+    /// Default value is `1`.
+    pub fn queues(mut self, queues: usize) -> Self {
+        self.queues = Some(queues);
         self
     }
 
@@ -164,16 +175,11 @@ impl TunBuilder {
     }
 
     /// Builds a new instance of [`Tun`](struct.Tun.html).
-    pub fn try_build(self) -> Result<Tun> {
-        Tun::new(self.into())
-    }
-
-    /// Builds multiple instances of [`Tun`](struct.Tun.html) with `IFF_MULTI_QUEUE` flag.
-    ///
-    /// Internally this creates multiple file descriptors to parallelize packet sending and receiving.
-    #[cfg(target_os = "linux")]
-    pub fn try_build_mq(self, queues: usize) -> Result<Vec<Tun>> {
-        Tun::new_mq(self.into(), queues)
+    pub fn build(self) -> Result<Vec<Tun>> {
+        match self.queues {
+            Some(queues) if queues > 1 => Tun::new_mq(self.into(), queues),
+            _ => Tun::new(self.into()).map(|tun| vec![tun]),
+        }
     }
 }
 

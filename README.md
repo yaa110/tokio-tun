@@ -17,7 +17,9 @@ async fn main() {
             .tap()               // uses TAP instead of TUN (default).
             .packet_info()       // avoids setting IFF_NO_PI.
             .up()                // or set it up manually using `sudo ip link set <tun-name> up`.
-            .try_build()         // or `.try_build_mq(queues)` for multi-queue support.
+            .build()
+            .unwrap()
+            .pop()
             .unwrap(),
     );
 

@@ -15,7 +15,8 @@ async fn main() {
         .destination(Ipv4Addr::new(10, 1, 0, 1))
         .broadcast(Ipv4Addr::BROADCAST)
         .netmask(Ipv4Addr::new(255, 255, 255, 0))
-        .try_build_mq(queues)
+        .queues(queues)
+        .build()
         .unwrap();
 
     println!("--------------");
