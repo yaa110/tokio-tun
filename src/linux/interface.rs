@@ -1,7 +1,7 @@
 use super::params::Params;
 use super::request::ifreq;
-use crate::linux::address::Ipv4AddrExt;
-use crate::Result;
+use crate::linux::address::{AddrExt};
+use crate::{MacAddr, Result};
 use std::net::Ipv4Addr;
 
 nix::ioctl_write_int!(tunsetiff, b'T', 202);
@@ -15,6 +15,7 @@ nix::ioctl_write_ptr_bad!(siocsifaddr, libc::SIOCSIFADDR, ifreq);
 nix::ioctl_write_ptr_bad!(siocsifdstaddr, libc::SIOCSIFDSTADDR, ifreq);
 nix::ioctl_write_ptr_bad!(siocsifbrdaddr, libc::SIOCSIFBRDADDR, ifreq);
 nix::ioctl_write_ptr_bad!(siocsifnetmask, libc::SIOCSIFNETMASK, ifreq);
+nix::ioctl_write_ptr_bad!(siocsifhwaddr, libc::SIOCSIFHWADDR, ifreq);
 
 nix::ioctl_read_bad!(siocgifmtu, libc::SIOCGIFMTU, ifreq);
 nix::ioctl_read_bad!(siocgifflags, libc::SIOCGIFFLAGS, ifreq);
@@ -22,6 +23,7 @@ nix::ioctl_read_bad!(siocgifaddr, libc::SIOCGIFADDR, ifreq);
 nix::ioctl_read_bad!(siocgifdstaddr, libc::SIOCGIFDSTADDR, ifreq);
 nix::ioctl_read_bad!(siocgifbrdaddr, libc::SIOCGIFBRDADDR, ifreq);
 nix::ioctl_read_bad!(siocgifnetmask, libc::SIOCGIFNETMASK, ifreq);
+nix::ioctl_read_bad!(siocgifhwaddr, libc::SIOCGIFHWADDR, ifreq);
 
 #[derive(Clone)]
 pub struct Interface {
@@ -68,6 +70,9 @@ impl Interface {
         }
         if let Some(broadcast) = params.broadcast {
             self.broadcast(Some(broadcast))?;
+        }
+        if let Some(hardware_address) = params.hardware_address {
+            self.hardware_address(Some(hardware_address))?;
         }
         if params.persist {
             self.persist()?;
@@ -139,6 +144,17 @@ impl Interface {
         }
         unsafe { siocgifbrdaddr(self.socket, &mut req) }?;
         Ok(unsafe { Ipv4Addr::from_address(req.ifr_ifru.ifru_broadaddr) })
+    }
+
+    pub fn hardware_address(&self, hardware_address: Option<MacAddr>) -> Result<MacAddr> {
+        let mut req = ifreq::new(self.name());
+        if let Some(hardware_address) = hardware_address {
+            req.ifr_ifru.ifru_hwaddr = hardware_address.to_address();
+            unsafe { siocsifhwaddr(self.socket, &req) }?;
+            return Ok(hardware_address);
+        }
+        unsafe { siocgifhwaddr(self.socket, &mut req) }?;
+        Ok(unsafe { MacAddr::from_address(req.ifr_ifru.ifru_hwaddr) })
     }
 
     pub fn flags(&self, flags: Option<i16>) -> Result<i16> {

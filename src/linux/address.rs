@@ -2,12 +2,13 @@ use super::request::sockaddr;
 use std::mem;
 use std::net::Ipv4Addr;
 
-pub trait Ipv4AddrExt {
+pub trait AddrExt {
     fn to_address(&self) -> sockaddr;
     fn from_address(sock: sockaddr) -> Self;
 }
 
-impl Ipv4AddrExt for Ipv4Addr {
+
+impl AddrExt for Ipv4Addr {
     fn to_address(&self) -> sockaddr {
         let mut addr: libc::sockaddr_in = unsafe { mem::zeroed() };
         addr.sin_family = libc::AF_INET as _;

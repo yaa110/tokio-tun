@@ -1,4 +1,6 @@
 #[cfg(target_os = "linux")]
+use crate::linux::macaddr::MacAddr;
+#[cfg(target_os = "linux")]
 use crate::linux::params::Params;
 #[cfg(target_os = "linux")]
 use crate::tun::Tun;
@@ -21,6 +23,8 @@ pub struct TunBuilder {
     destination: Option<Ipv4Addr>,
     broadcast: Option<Ipv4Addr>,
     netmask: Option<Ipv4Addr>,
+    #[cfg(target_os = "linux")]
+    hardware_address: Option<MacAddr>,
     queues: Option<usize>,
 }
 
@@ -39,6 +43,7 @@ impl Default for TunBuilder {
             destination: None,
             broadcast: None,
             netmask: None,
+            hardware_address: None,
             queues: None,
         }
     }
@@ -152,6 +157,11 @@ impl TunBuilder {
         self
     }
 
+    pub fn hardware_address(mut self, address: MacAddr) -> Self {
+        self.hardware_address = Some(address);
+        self
+    }
+
     /// Makes the device persistent.
     ///
     /// Persistent devices stay registered as long as the computer is not restarted.
@@ -207,6 +217,7 @@ impl From<TunBuilder> for Params {
             address: builder.address,
             destination: builder.destination,
             broadcast: builder.broadcast,
+            hardware_address: builder.hardware_address,
             netmask: builder.netmask,
         }
     }

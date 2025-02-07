@@ -1,3 +1,4 @@
+use crate::linux::macaddr::MacAddr;
 use crate::linux::interface::Interface;
 use crate::linux::io::TunIo;
 use crate::linux::params::Params;
@@ -253,29 +254,34 @@ impl Tun {
         self.iface.name()
     }
 
-    /// Returns the value of MTU.
+    /// Returns the value of the Tun/Tap device.
     pub fn mtu(&self) -> Result<i32> {
         self.iface.mtu(None)
     }
 
-    /// Returns the IPv4 address of MTU.
+    /// Returns the IPv4 address of the Tun/Tap device.
     pub fn address(&self) -> Result<Ipv4Addr> {
         self.iface.address(None)
     }
 
-    /// Returns the IPv4 destination address of MTU.
+    /// Returns the IPv4 destination address of the Tun/Tap device.
     pub fn destination(&self) -> Result<Ipv4Addr> {
         self.iface.destination(None)
     }
 
-    /// Returns the IPv4 broadcast address of MTU.
+    /// Returns the IPv4 broadcast address of the Tun/Tap device.
     pub fn broadcast(&self) -> Result<Ipv4Addr> {
         self.iface.broadcast(None)
     }
 
-    /// Returns the IPv4 netmask address of MTU.
+    /// Returns the IPv4 netmask address of the Tun/Tap device.
     pub fn netmask(&self) -> Result<Ipv4Addr> {
         self.iface.netmask(None)
+    }
+
+    /// Returns the Hardware address of the Tun/Tap device.
+    pub fn hardware_address(&self) -> Result<MacAddr> {
+        self.iface.hardware_address(None)
     }
 
     /// Returns the flags of MTU.
