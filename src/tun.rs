@@ -1,8 +1,8 @@
+use crate::Result;
+use crate::TunBuilder;
 use crate::linux::interface::Interface;
 use crate::linux::io::TunIo;
 use crate::linux::params::Params;
-use crate::Result;
-use crate::TunBuilder;
 use std::io::{self, ErrorKind, IoSlice, Read, Write};
 use std::mem;
 use std::net::Ipv4Addr;

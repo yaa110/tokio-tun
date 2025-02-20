@@ -1,8 +1,8 @@
+use crate::Result;
 #[cfg(target_os = "linux")]
 use crate::linux::params::Params;
 #[cfg(target_os = "linux")]
 use crate::tun::Tun;
-use crate::Result;
 use core::convert::From;
 use libc::{IFF_NO_PI, IFF_TAP, IFF_TUN};
 use std::net::Ipv4Addr;

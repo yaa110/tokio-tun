@@ -3,14 +3,14 @@ authors = ["Navid <yaa110@gmail.com>"]
 categories = ["asynchronous", "network-programming"]
 description = "Asynchronous allocation of TUN/TAP devices using tokio"
 documentation = "https://docs.rs/tokio-tun"
-edition = "2021"
+edition = "2024"
 homepage = "https://github.com/yaa110/tokio-tun"
 keywords = ["tun", "tap", "async", "tokio"]
 license = "MIT OR Apache-2.0"
 name = "tokio-tun"
 readme = "README.md"
 repository = "https://github.com/yaa110/tokio-tun"
-version = "0.13.0"
+version = "0.13.2"
 
 [dependencies]
 libc = "0.2"
