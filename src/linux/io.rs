@@ -1,6 +1,6 @@
 use std::convert::From;
 use std::io::{self, IoSlice, Read, Write};
-use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 
 pub struct TunIo(RawFd);
 
@@ -13,6 +13,12 @@ impl From<RawFd> for TunIo {
 impl FromRawFd for TunIo {
     unsafe fn from_raw_fd(fd: RawFd) -> Self {
         Self(fd)
+    }
+}
+
+impl IntoRawFd for TunIo {
+    fn into_raw_fd(self) -> RawFd {
+        self.0
     }
 }
 
