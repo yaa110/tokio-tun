@@ -1,7 +1,7 @@
 use crate::Result;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 use crate::linux::params::Params;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 use crate::tun::Tun;
 use core::convert::From;
 use libc::{IFF_NO_PI, IFF_TAP, IFF_TUN};
@@ -184,7 +184,7 @@ impl TunBuilder {
 }
 
 impl From<TunBuilder> for Params {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     fn from(builder: TunBuilder) -> Self {
         Params {
             name: if builder.name.is_empty() {
@@ -211,7 +211,7 @@ impl From<TunBuilder> for Params {
         }
     }
 
-    #[cfg(not(any(target_os = "linux")))]
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
     fn from(builder: TunBuilder) -> Self {
         unimplemented!()
     }
