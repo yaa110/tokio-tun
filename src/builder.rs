@@ -22,6 +22,7 @@ pub struct TunBuilder {
     broadcast: Option<Ipv4Addr>,
     netmask: Option<Ipv4Addr>,
     queues: Option<usize>,
+    cloexec: bool,
 }
 
 impl Default for TunBuilder {
@@ -40,6 +41,7 @@ impl Default for TunBuilder {
             broadcast: None,
             netmask: None,
             queues: None,
+            cloexec: true,
         }
     }
 }
@@ -152,6 +154,14 @@ impl TunBuilder {
         self
     }
 
+    /// Removes CLOEXEC flag on all FDs. This will allow passing tun/tap FDs to any exec-ed
+    /// child processes.
+    /// Default behaviour is to prevent passing fds flag.
+    pub fn no_close_on_exec(mut self) -> Self {
+        self.cloexec = false;
+        self
+    }
+
     /// Makes the device persistent.
     ///
     /// Persistent devices stay registered as long as the computer is not restarted.
@@ -208,6 +218,7 @@ impl From<TunBuilder> for Params {
             destination: builder.destination,
             broadcast: builder.broadcast,
             netmask: builder.netmask,
+            cloexec: builder.cloexec,
         }
     }
 

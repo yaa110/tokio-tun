@@ -31,7 +31,8 @@ pub struct Interface {
 }
 
 impl Interface {
-    pub fn new(fds: Vec<i32>, name: &str, mut flags: i16) -> Result<Self> {
+    pub fn new(fds: Vec<i32>, name: &str, mut flags: i16, cloexec: bool) -> Result<Self> {
+        let extra_flags = if cloexec { libc::O_CLOEXEC } else { 0 };
         let mut req = ifreq::new(name);
         if fds.len() > 1 {
             flags |= libc::IFF_MULTI_QUEUE as i16;
@@ -42,7 +43,7 @@ impl Interface {
         }
         Ok(Interface {
             fds,
-            socket: unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) },
+            socket: unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM | extra_flags, 0) },
             name: req.name().to_owned(),
         })
     }
