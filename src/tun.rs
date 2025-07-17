@@ -144,11 +144,13 @@ impl Tun {
     }
 
     fn allocate(params: Params, queues: usize) -> Result<Interface> {
+        let extra_flags = if params.cloexec { libc::O_CLOEXEC } else { 0 };
+
         let fds = (0..queues)
             .map(|_| unsafe {
                 match libc::open(
                     TUN.as_ptr().cast::<c_char>(),
-                    libc::O_RDWR | libc::O_NONBLOCK,
+                    libc::O_RDWR | libc::O_NONBLOCK | extra_flags,
                 ) {
                     fd if fd >= 0 => Ok(fd),
                     _ => Err(io::Error::last_os_error().into()),
@@ -160,6 +162,7 @@ impl Tun {
             fds,
             params.name.as_deref().unwrap_or_default(),
             params.flags,
+            params.cloexec,
         )?;
         iface.init(params)?;
         Ok(iface)
