@@ -162,6 +162,14 @@ impl TunBuilder {
         self
     }
 
+    /// Adds CLOEXEC flag on all FDs. This will prevent passing FDs to any exec-ed
+    /// child processes.
+    /// Default behaviour is to prevent passing fds flag.
+    pub fn close_on_exec(mut self) -> Self {
+        self.cloexec = true;
+        self
+    }
+
     /// Makes the device persistent.
     ///
     /// Persistent devices stay registered as long as the computer is not restarted.

@@ -17,6 +17,7 @@ async fn main() {
             .tap()               // uses TAP instead of TUN (default).
             .packet_info()       // avoids setting IFF_NO_PI.
             .up()                // or set it up manually using `sudo ip link set <tun-name> up`.
+            .close_on_exec()     // or no_close_on_exec()
             .build()
             .unwrap()
             .pop()

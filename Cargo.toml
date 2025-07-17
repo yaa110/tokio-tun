@@ -10,7 +10,7 @@ license = "MIT OR Apache-2.0"
 name = "tokio-tun"
 readme = "README.md"
 repository = "https://github.com/yaa110/tokio-tun"
-version = "0.14.0"
+version = "0.14.1"
 
 [dependencies]
 libc = "0.2"
