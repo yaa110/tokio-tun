@@ -10,24 +10,12 @@ jobs:
   linux:
     runs-on: ubuntu-latest
     steps:
-      - name: checkout the code
-        uses: actions/checkout@v2
-      - name: Stable with rustfmt and clippy
-        uses: actions-rs/toolchain@v1
+      - name: test and build
+        uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          profile: minimal
-          toolchain: stable
           components: rustfmt, clippy
-      - name: Debug build
-        uses: actions-rs/cargo@v1
-        with:
-          command: build
-      - name: Check format
-        uses: actions-rs/cargo@v1
-        with:
-          command: fmt
-          args: -- --check
-      - name: Run clippy
-        uses: actions-rs/cargo@v1
-        with:
-          command: clippy
+      - run: cargo test
+      - run: cargo fmt -- --check
+      - run: cargo clippy
+      - run: cargo build
