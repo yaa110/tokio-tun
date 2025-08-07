@@ -211,10 +211,10 @@ impl Tun {
         Ok(())
     }
 
-    /// Sends several different buffers to the Tun/Tap interface. Returns the number of bytes written to the device.
+    /// Sends vectored buffers to the Tun/Tap interface. Returns the number of bytes written to the device.
     ///
     /// This method takes &self, so it is possible to call this method concurrently with other methods on this struct.
-    pub async fn send_vectored(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
+    pub async fn sendv(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
         loop {
             let mut guard = self.io.writable().await?;
             match guard.try_io(|inner| inner.get_ref().sendv(bufs)) {
@@ -222,6 +222,36 @@ impl Tun {
                 Err(_) => continue,
             }
         }
+    }
+
+    /// Attempts to write an entire vectored buffer to this writer.
+    ///
+    /// This method will continuously call `sendv` until all data has been
+    /// written or an error occurs. This method will not return until all data has
+    /// been written.
+    ///
+    /// This implementation provides optimal performance for high-throughput scenarios
+    /// by advancing buffers in-place without allocations.
+    ///
+    /// # Errors
+    ///
+    /// This function will return the first error that `sendv` returns.
+    pub async fn sendv_all(&self, bufs: &mut [IoSlice<'_>]) -> io::Result<()> {
+        let mut bufs = bufs;
+        while !bufs.is_empty() {
+            match self.sendv(bufs).await? {
+                0 => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WriteZero,
+                        "failed to write whole buffer",
+                    ));
+                }
+                n => {
+                    IoSlice::advance_slices(&mut bufs, n);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Tries to receive a buffer from the Tun/Tap interface.
@@ -247,7 +277,7 @@ impl Tun {
     /// When the socket buffer is full, `Err(io::ErrorKind::WouldBlock)` is returned.
     ///
     /// This method takes &self, so it is possible to call this method concurrently with other methods on this struct.
-    pub fn try_send_vectored(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
+    pub fn try_sendv(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
         self.io.get_ref().sendv(bufs)
     }
 
