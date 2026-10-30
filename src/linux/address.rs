@@ -23,3 +23,17 @@ impl Ipv4AddrExt for Ipv4Addr {
         sock.sin_addr.s_addr.to_ne_bytes().into()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ipv4_addr_ext_roundtrip() {
+        let ip = Ipv4Addr::new(192, 168, 1, 100);
+        let sock = ip.to_address();
+        assert_eq!(sock.sa_family, libc::AF_INET as _);
+        let recovered = Ipv4Addr::from_address(sock);
+        assert_eq!(ip, recovered);
+    }
+}

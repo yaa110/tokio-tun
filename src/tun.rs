@@ -116,9 +116,12 @@ impl Tun {
     pub(crate) fn new(params: Params) -> Result<Self> {
         let iface = Self::allocate(params, 1)?;
         let fd = iface.files()[0];
+        // SAFETY: `fd` is an open and valid file descriptor owned by `TunIo`,
+        // which remains valid for the lifetime of `AsyncFd`.
+        let io = unsafe { AsyncFd::register(TunIo::from(fd)) }.map_err(io::Error::from)?;
         Ok(Self {
             iface: Arc::new(iface),
-            io: AsyncFd::new(TunIo::from(fd))?,
+            io,
         })
     }
 
@@ -128,9 +131,12 @@ impl Tun {
         let mut tuns = Vec::with_capacity(queues);
         let iface = Arc::new(iface);
         for &fd in iface.files() {
+            // SAFETY: `fd` is an open and valid file descriptor owned by `TunIo`,
+            // which remains valid for the lifetime of `AsyncFd`.
+            let io = unsafe { AsyncFd::register(TunIo::from(fd)) }.map_err(io::Error::from)?;
             tuns.push(Self {
                 iface: iface.clone(),
-                io: AsyncFd::new(TunIo::from(fd))?,
+                io,
             })
         }
         Ok(tuns)
@@ -318,11 +324,12 @@ mod tests {
     use tokio::io::AsyncWriteExt;
     use tokio::time::{Duration, timeout};
 
-    #[allow(deprecated)] // Match the AsyncFd API supported by this crate.
     fn socket_pair_tun() -> (Tun, UnixStream) {
         let (writer, reader) = UnixStream::pair().unwrap();
         writer.set_nonblocking(true).unwrap();
-        let io = AsyncFd::new(TunIo::from(writer.into_raw_fd())).unwrap();
+        // SAFETY: `writer` is a valid open file descriptor that is converted into
+        // a raw fd and owned by `TunIo` for the lifetime of `AsyncFd`.
+        let io = unsafe { AsyncFd::register(TunIo::from(writer.into_raw_fd())) }.unwrap();
         // No TUN device is configured by this fixture. The empty interface is
         // only metadata; I/O uses a non-fsyncable socket pair.
         let iface = Arc::new(Interface::new(Vec::new(), "", 0, false).unwrap());
