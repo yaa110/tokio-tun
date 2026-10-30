@@ -38,10 +38,7 @@ impl Write for TunIo {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        let ret = unsafe { libc::fsync(self.0) };
-        if ret < 0 {
-            return Err(io::Error::last_os_error());
-        }
+        // Writes go directly to the device; there is no userspace buffer to flush.
         Ok(())
     }
 }
@@ -82,5 +79,26 @@ impl TunIo {
 impl Drop for TunIo {
     fn drop(&mut self) {
         unsafe { libc::close(self.0) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::fd::IntoRawFd;
+    use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn flush_unbuffered_io() {
+        // A socket pair exercises the non-fsyncable descriptor without creating
+        // a TUN interface or requiring network administration privileges.
+        let (writer, mut reader) = UnixStream::pair().unwrap();
+        let mut io = TunIo::from(writer.into_raw_fd());
+        io.flush().unwrap();
+        io.write_all(b"packet").unwrap();
+        io.flush().unwrap();
+        let mut data = [0; 6];
+        reader.read_exact(&mut data).unwrap();
+        assert_eq!(&data, b"packet");
     }
 }
