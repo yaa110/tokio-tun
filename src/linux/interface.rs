@@ -2,6 +2,7 @@ use super::params::Params;
 use super::request::ifreq;
 use crate::Result;
 use crate::linux::address::Ipv4AddrExt;
+use std::ffi::CString;
 use std::net::Ipv4Addr;
 
 nix::ioctl_write_int!(tunsetiff, b'T', 202);
@@ -85,6 +86,21 @@ impl Interface {
 
     pub fn name(&self) -> &str {
         self.name.as_str()
+    }
+
+    /// Returns the interface index for the device name.
+    pub fn index(&self) -> Result<u32> {
+        let name = CString::new(self.name.as_str()).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "interface name contains a NUL byte",
+            )
+        })?;
+        let index = unsafe { libc::if_nametoindex(name.as_ptr()) };
+        if index == 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        Ok(index)
     }
 
     pub fn mtu(&self, mtu: Option<i32>) -> Result<i32> {
@@ -177,5 +193,16 @@ impl Interface {
 impl Drop for Interface {
     fn drop(&mut self) {
         unsafe { libc::close(self.socket) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn index_resolves_loopback() {
+        let interface = Interface::new(Vec::new(), "lo", 0, false).unwrap();
+        assert!(interface.index().unwrap() > 0);
     }
 }
