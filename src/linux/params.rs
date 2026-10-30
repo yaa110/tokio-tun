@@ -1,7 +1,7 @@
 use std::net::Ipv4Addr;
 
 /// Represents parameters for creating a new Tun/Tap device on Linux.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub struct Params {
     pub name: Option<String>,
     pub flags: i16,
