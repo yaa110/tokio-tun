@@ -24,7 +24,12 @@ async fn main() {
             .unwrap(),
     );
 
-    println!("tun created, name: {}, fd: {}", tun.name(), tun.as_raw_fd());
+    println!(
+        "tun created, name: {}, index: {}, fd: {}",
+        tun.name(),
+        tun.index().unwrap(),
+        tun.as_raw_fd()
+    );
 
     let (mut reader, mut _writer) = tokio::io::split(tun);
 

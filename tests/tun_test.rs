@@ -38,6 +38,7 @@ async fn test_tun_builder_defaults_and_kernel_naming() {
         tun.name()
     );
     assert!(tun.as_raw_fd() > 0);
+    assert!(tun.index().unwrap() > 0);
     assert!(tun.mtu().is_ok());
     assert!(tun.flags().is_ok());
 }

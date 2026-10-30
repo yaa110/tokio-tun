@@ -285,6 +285,11 @@ impl Tun {
         self.iface.name()
     }
 
+    /// Returns the interface index of the Tun/Tap device.
+    pub fn index(&self) -> Result<u32> {
+        self.iface.index()
+    }
+
     /// Returns the value of MTU.
     pub fn mtu(&self) -> Result<i32> {
         self.iface.mtu(None)
