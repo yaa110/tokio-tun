@@ -1,0 +1,14 @@
+Cargo.toml
+  h_20fc4d483d1064 13
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "486786f3a379e52bda4fad462eda6b47fb65448c",
+  "prompts": {},
+  "humans": {
+    "h_20fc4d483d1064": {
+      "author": "Navid <3187511+yaa110@users.noreply.github.com>"
+    }
+  }
+}
