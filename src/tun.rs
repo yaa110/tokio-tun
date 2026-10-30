@@ -97,16 +97,9 @@ impl AsyncWrite for Tun {
         true
     }
 
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> task::Poll<io::Result<()>> {
-        let self_mut = self.get_mut();
-        loop {
-            let mut guard = ready!(self_mut.io.poll_write_ready_mut(cx))?;
-
-            match guard.try_io(|inner| inner.get_mut().flush()) {
-                Ok(result) => return Poll::Ready(result),
-                Err(_) => continue,
-            }
-        }
+    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> task::Poll<io::Result<()>> {
+        // TunIo is unbuffered, so flushing must not wait for write readiness.
+        Poll::Ready(self.get_mut().io.get_mut().flush())
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> task::Poll<io::Result<()>> {
@@ -314,5 +307,46 @@ impl Tun {
     /// Returns the flags of MTU.
     pub fn flags(&self) -> Result<i16> {
         self.iface.flags(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::fd::IntoRawFd;
+    use std::os::unix::net::UnixStream;
+    use tokio::io::AsyncWriteExt;
+    use tokio::time::{Duration, timeout};
+
+    #[allow(deprecated)] // Match the AsyncFd API supported by this crate.
+    fn socket_pair_tun() -> (Tun, UnixStream) {
+        let (writer, reader) = UnixStream::pair().unwrap();
+        writer.set_nonblocking(true).unwrap();
+        let io = AsyncFd::new(TunIo::from(writer.into_raw_fd())).unwrap();
+        // No TUN device is configured by this fixture. The empty interface is
+        // only metadata; I/O uses a non-fsyncable socket pair.
+        let iface = Arc::new(Interface::new(Vec::new(), "", 0, false).unwrap());
+        (Tun { iface, io }, reader)
+    }
+
+    #[tokio::test]
+    async fn flush_direct_and_split() {
+        let (mut tun, mut reader) = socket_pair_tun();
+        timeout(Duration::from_secs(1), tun.flush())
+            .await
+            .unwrap()
+            .unwrap();
+        tun.write_all(b"first").await.unwrap();
+        tun.flush().await.unwrap();
+        let mut first = [0; 5];
+        reader.read_exact(&mut first).unwrap();
+        assert_eq!(&first, b"first");
+
+        let (_read_half, mut writer) = tokio::io::split(tun);
+        writer.write_all(b"second").await.unwrap();
+        writer.flush().await.unwrap();
+        let mut second = [0; 6];
+        reader.read_exact(&mut second).unwrap();
+        assert_eq!(&second, b"second");
     }
 }
