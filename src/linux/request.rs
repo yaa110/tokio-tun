@@ -83,3 +83,21 @@ impl ifreq {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ifreq_name_and_truncation() {
+        let req = ifreq::new("tun0");
+        assert_eq!(req.name(), "tun0");
+
+        let overlong = ifreq::new("12345678901234567890");
+        assert_eq!(overlong.name(), "123456789012345");
+        assert_eq!(overlong.name().len(), 15);
+
+        let empty = ifreq::new("");
+        assert_eq!(empty.name(), "");
+    }
+}

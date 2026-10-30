@@ -30,3 +30,22 @@ impl From<nix::Error> for Error {
         Self::NixError(err)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_error_from_io_and_display() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "device not found");
+        let err: Error = io_err.into();
+        assert_eq!(format!("{err}"), "device not found");
+    }
+
+    #[test]
+    fn test_error_from_nix_and_display() {
+        let nix_err = nix::Error::from_raw(libc::EINVAL);
+        let err: Error = nix_err.into();
+        assert_eq!(format!("{err}"), "EINVAL: Invalid argument");
+    }
+}
