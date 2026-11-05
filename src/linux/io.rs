@@ -1,14 +1,7 @@
-use std::convert::From;
 use std::io::{self, IoSlice, Read, Write};
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 
 pub struct TunIo(RawFd);
-
-impl From<RawFd> for TunIo {
-    fn from(fd: RawFd) -> Self {
-        Self(fd)
-    }
-}
 
 impl FromRawFd for TunIo {
     unsafe fn from_raw_fd(fd: RawFd) -> Self {
@@ -93,7 +86,7 @@ mod tests {
         // A socket pair exercises the non-fsyncable descriptor without creating
         // a TUN interface or requiring network administration privileges.
         let (writer, mut reader) = UnixStream::pair().unwrap();
-        let mut io = TunIo::from(writer.into_raw_fd());
+        let mut io = unsafe { TunIo::from_raw_fd(writer.into_raw_fd()) };
         io.flush().unwrap();
         io.write_all(b"packet").unwrap();
         io.flush().unwrap();

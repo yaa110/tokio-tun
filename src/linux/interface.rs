@@ -1,8 +1,12 @@
 use super::params::Params;
 use super::request::ifreq;
 use crate::Result;
-use crate::linux::address::Ipv4AddrExt;
+use crate::address::{AddressInfo, ipv4_broadcast};
+use crate::linux::address::ipv4_from_sockaddr;
+use crate::linux::netlink;
 use std::ffi::CString;
+use std::io;
+use std::mem;
 use std::net::Ipv4Addr;
 
 nix::ioctl_write_int!(tunsetiff, b'T', 202);
@@ -12,27 +16,30 @@ nix::ioctl_write_int!(tunsetgroup, b'T', 206);
 
 nix::ioctl_write_ptr_bad!(siocsifmtu, libc::SIOCSIFMTU, ifreq);
 nix::ioctl_write_ptr_bad!(siocsifflags, libc::SIOCSIFFLAGS, ifreq);
-nix::ioctl_write_ptr_bad!(siocsifaddr, libc::SIOCSIFADDR, ifreq);
-nix::ioctl_write_ptr_bad!(siocsifdstaddr, libc::SIOCSIFDSTADDR, ifreq);
-nix::ioctl_write_ptr_bad!(siocsifbrdaddr, libc::SIOCSIFBRDADDR, ifreq);
-nix::ioctl_write_ptr_bad!(siocsifnetmask, libc::SIOCSIFNETMASK, ifreq);
 
 nix::ioctl_read_bad!(siocgifmtu, libc::SIOCGIFMTU, ifreq);
 nix::ioctl_read_bad!(siocgifflags, libc::SIOCGIFFLAGS, ifreq);
-nix::ioctl_read_bad!(siocgifaddr, libc::SIOCGIFADDR, ifreq);
-nix::ioctl_read_bad!(siocgifdstaddr, libc::SIOCGIFDSTADDR, ifreq);
 nix::ioctl_read_bad!(siocgifbrdaddr, libc::SIOCGIFBRDADDR, ifreq);
 nix::ioctl_read_bad!(siocgifnetmask, libc::SIOCGIFNETMASK, ifreq);
 
-#[derive(Clone)]
+const MAX_INTERFACE_NAME_LEN: usize = 15;
+
 pub struct Interface {
     fds: Vec<i32>,
     socket: i32,
+    index: u32,
     name: String,
 }
 
 impl Interface {
     pub fn new(fds: Vec<i32>, name: &str, mut flags: i16, cloexec: bool) -> Result<Self> {
+        if name.len() > MAX_INTERFACE_NAME_LEN || name.contains('\0') {
+            close_fds(&fds);
+            return Err(
+                io::Error::new(io::ErrorKind::InvalidInput, "invalid interface name").into(),
+            );
+        }
+
         let extra_flags = if cloexec { libc::O_CLOEXEC } else { 0 };
         let mut req = ifreq::new(name);
         if fds.len() > 1 {
@@ -40,16 +47,52 @@ impl Interface {
         }
         req.ifr_ifru.ifru_flags = flags;
         for &fd in &fds {
-            unsafe { tunsetiff(fd, &req as *const _ as _) }?;
+            if let Err(err) = unsafe { tunsetiff(fd, &mut req as *mut _ as _) } {
+                close_fds(&fds);
+                return Err(err.into());
+            }
         }
+
+        let name = match req.name() {
+            Ok(name) => name.to_owned(),
+            Err(_) => {
+                close_fds(&fds);
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "interface name is not valid UTF-8",
+                )
+                .into());
+            }
+        };
+        let index = if name.is_empty() {
+            0
+        } else {
+            match if_nametoindex(&name) {
+                Ok(index) => index,
+                Err(err) => {
+                    close_fds(&fds);
+                    return Err(err);
+                }
+            }
+        };
+
+        let socket = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM | extra_flags, 0) };
+        if socket < 0 {
+            let err = io::Error::last_os_error();
+            close_fds(&fds);
+            return Err(err.into());
+        }
+
         Ok(Interface {
             fds,
-            socket: unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM | extra_flags, 0) },
-            name: req.name().to_owned(),
+            socket,
+            index,
+            name,
         })
     }
 
     pub fn init(&self, params: Params) -> Result<()> {
+        let index = self.verify_index()?;
         if let Some(mtu) = params.mtu {
             self.mtu(Some(mtu))?;
         }
@@ -59,48 +102,66 @@ impl Interface {
         if let Some(group) = params.group {
             self.group(group)?;
         }
-        if let Some(address) = params.address {
-            self.address(Some(address))?;
+
+        let broadcast_capable = (self.flags(None)? & (libc::IFF_BROADCAST as i16)) != 0;
+        let mut addresses = Vec::with_capacity(params.addresses.len());
+        for config in &params.addresses {
+            let mut config = *config;
+            config.broadcast = match config.address {
+                std::net::IpAddr::V4(address)
+                    if config.broadcast.is_none()
+                        && config.prefix_len < 31
+                        && broadcast_capable =>
+                {
+                    ipv4_broadcast(address, config.prefix_len)
+                }
+                _ => config.broadcast,
+            };
+            addresses.push(config);
         }
-        if let Some(netmask) = params.netmask {
-            self.netmask(Some(netmask))?;
-        }
-        if let Some(destination) = params.destination {
-            self.destination(Some(destination))?;
-        }
-        if let Some(broadcast) = params.broadcast {
-            self.broadcast(Some(broadcast))?;
-        }
-        if params.persist {
-            self.persist()?;
-        }
+        netlink::add_addresses(index, &addresses)?;
+
         if params.up {
             self.flags(Some(libc::IFF_UP as i16 | libc::IFF_RUNNING as i16))?;
         }
         Ok(())
     }
 
-    pub fn files(&self) -> &[i32] {
-        &self.fds
+    /// Verifies that the stored interface index still refers to this interface.
+    fn verify_index(&self) -> Result<u32> {
+        let mut name = [0 as libc::c_char; 16];
+        let resolved = unsafe { libc::if_indextoname(self.index, name.as_mut_ptr()) };
+        if resolved.is_null() {
+            return Err(io::Error::last_os_error().into());
+        }
+        let resolved = unsafe { std::ffi::CStr::from_ptr(resolved) };
+        if resolved.to_bytes() != self.name.as_bytes() {
+            return Err(
+                io::Error::new(io::ErrorKind::InvalidData, "interface identity changed").into(),
+            );
+        }
+        Ok(self.index)
+    }
+
+    /// Returns the TUN/TAP file descriptors, transferring their ownership.
+    ///
+    /// The caller becomes responsible for closing them.
+    pub fn take_files(&mut self) -> Vec<i32> {
+        mem::take(&mut self.fds)
     }
 
     pub fn name(&self) -> &str {
         self.name.as_str()
     }
 
-    /// Returns the interface index for the device name.
+    /// Returns the interface index of the device.
     pub fn index(&self) -> Result<u32> {
-        let name = CString::new(self.name.as_str()).map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "interface name contains a NUL byte",
-            )
-        })?;
-        let index = unsafe { libc::if_nametoindex(name.as_ptr()) };
-        if index == 0 {
-            return Err(std::io::Error::last_os_error().into());
-        }
-        Ok(index)
+        self.verify_index()
+    }
+
+    /// Returns all IPv4 and IPv6 addresses assigned to the device.
+    pub fn addresses(&self) -> Result<Vec<AddressInfo>> {
+        netlink::get_addresses(self.verify_index()?)
     }
 
     pub fn mtu(&self, mtu: Option<i32>) -> Result<i32> {
@@ -114,48 +175,18 @@ impl Interface {
         Ok(unsafe { req.ifr_ifru.ifru_mtu })
     }
 
-    pub fn netmask(&self, netmask: Option<Ipv4Addr>) -> Result<Ipv4Addr> {
+    pub fn netmask(&self) -> Result<Ipv4Addr> {
         let mut req = ifreq::new(self.name());
-        if let Some(netmask) = netmask {
-            req.ifr_ifru.ifru_netmask = netmask.to_address();
-            unsafe { siocsifnetmask(self.socket, &req) }?;
-            return Ok(netmask);
-        }
         unsafe { siocgifnetmask(self.socket, &mut req) }?;
-        Ok(unsafe { Ipv4Addr::from_address(req.ifr_ifru.ifru_netmask) })
+        let netmask = unsafe { req.ifr_ifru.ifru_netmask };
+        Ok(ipv4_from_sockaddr(netmask))
     }
 
-    pub fn address(&self, address: Option<Ipv4Addr>) -> Result<Ipv4Addr> {
+    pub fn broadcast(&self) -> Result<Ipv4Addr> {
         let mut req = ifreq::new(self.name());
-        if let Some(address) = address {
-            req.ifr_ifru.ifru_addr = address.to_address();
-            unsafe { siocsifaddr(self.socket, &req) }?;
-            return Ok(address);
-        }
-        unsafe { siocgifaddr(self.socket, &mut req) }?;
-        Ok(unsafe { Ipv4Addr::from_address(req.ifr_ifru.ifru_addr) })
-    }
-
-    pub fn destination(&self, dst: Option<Ipv4Addr>) -> Result<Ipv4Addr> {
-        let mut req = ifreq::new(self.name());
-        if let Some(dst) = dst {
-            req.ifr_ifru.ifru_dstaddr = dst.to_address();
-            unsafe { siocsifdstaddr(self.socket, &req) }?;
-            return Ok(dst);
-        }
-        unsafe { siocgifdstaddr(self.socket, &mut req) }?;
-        Ok(unsafe { Ipv4Addr::from_address(req.ifr_ifru.ifru_dstaddr) })
-    }
-
-    pub fn broadcast(&self, broadcast: Option<Ipv4Addr>) -> Result<Ipv4Addr> {
-        let mut req = ifreq::new(self.name());
-        if let Some(broadcast) = broadcast {
-            req.ifr_ifru.ifru_broadaddr = broadcast.to_address();
-            unsafe { siocsifbrdaddr(self.socket, &req) }?;
-            return Ok(broadcast);
-        }
         unsafe { siocgifbrdaddr(self.socket, &mut req) }?;
-        Ok(unsafe { Ipv4Addr::from_address(req.ifr_ifru.ifru_broadaddr) })
+        let broadcast = unsafe { req.ifr_ifru.ifru_broadaddr };
+        Ok(ipv4_from_sockaddr(broadcast))
     }
 
     pub fn flags(&self, flags: Option<i16>) -> Result<i16> {
@@ -181,28 +212,69 @@ impl Interface {
         }
         Ok(())
     }
+}
 
-    pub fn persist(&self) -> Result<()> {
-        for fd in self.fds.iter() {
-            unsafe { tunsetpersist(*fd, 1) }?;
-        }
-        Ok(())
-    }
+pub(crate) fn set_persist(fd: i32, persist: bool) -> Result<()> {
+    unsafe { tunsetpersist(fd, libc::c_ulong::from(persist)) }?;
+    Ok(())
 }
 
 impl Drop for Interface {
     fn drop(&mut self) {
         unsafe { libc::close(self.socket) };
+        close_fds(&self.fds);
+    }
+}
+
+fn if_nametoindex(name: &str) -> Result<u32> {
+    let name = CString::new(name).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "interface name contains a NUL byte",
+        )
+    })?;
+    let index = unsafe { libc::if_nametoindex(name.as_ptr()) };
+    if index == 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    Ok(index)
+}
+
+fn close_fds(fds: &[i32]) {
+    for &fd in fds {
+        unsafe { libc::close(fd) };
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::{IpAddr, Ipv6Addr};
 
     #[test]
     fn index_resolves_loopback() {
         let interface = Interface::new(Vec::new(), "lo", 0, false).unwrap();
         assert!(interface.index().unwrap() > 0);
+    }
+
+    #[test]
+    fn addresses_reads_loopback() {
+        let interface = Interface::new(Vec::new(), "lo", 0, false).unwrap();
+        let addresses = interface.addresses().unwrap();
+        assert!(addresses.iter().any(|info| info.address.is_ipv4()));
+        // IPv6 can be disabled in some environments.
+        if addresses.iter().any(|info| info.address.is_ipv6()) {
+            assert!(
+                addresses
+                    .iter()
+                    .any(|info| info.address == IpAddr::V6(Ipv6Addr::LOCALHOST))
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_interface_names() {
+        assert!(Interface::new(Vec::new(), "abcdefghijklmnop", 0, false).is_err());
+        assert!(Interface::new(Vec::new(), "tun0\0evil", 0, false).is_err());
     }
 }

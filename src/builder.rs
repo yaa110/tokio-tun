@@ -1,11 +1,14 @@
 use crate::Result;
+use crate::address::AddressConfig;
 #[cfg(target_os = "linux")]
 use crate::linux::params::Params;
 #[cfg(target_os = "linux")]
 use crate::tun::Tun;
-use core::convert::From;
 use libc::{IFF_NO_PI, IFF_TAP, IFF_TUN};
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
+
+const MAX_INTERFACE_NAME_LEN: usize = 15;
+const MAX_QUEUES: usize = 256;
 
 /// Represents a factory to build new instances of [`Tun`](struct.Tun.html).
 pub struct TunBuilder {
@@ -17,10 +20,8 @@ pub struct TunBuilder {
     mtu: Option<i32>,
     owner: Option<i32>,
     group: Option<i32>,
-    address: Option<Ipv4Addr>,
-    destination: Option<Ipv4Addr>,
-    broadcast: Option<Ipv4Addr>,
-    netmask: Option<Ipv4Addr>,
+    addresses: Vec<AddressConfig>,
+    invalid_reason: Option<&'static str>,
     queues: Option<usize>,
     cloexec: bool,
 }
@@ -36,10 +37,8 @@ impl Default for TunBuilder {
             up: false,
             mtu: None,
             packet_info: false,
-            address: None,
-            destination: None,
-            broadcast: None,
-            netmask: None,
+            addresses: Vec::new(),
+            invalid_reason: None,
             queues: None,
             cloexec: true,
         }
@@ -52,7 +51,10 @@ impl TunBuilder {
         Default::default()
     }
 
-    /// Sets the name of device (max length: 16 characters), if it is empty, then device name is set by kernel. Default value is empty.
+    /// Sets the name of device (max length: 15 bytes), if it is empty, then device name is set by kernel. Default value is empty.
+    ///
+    /// Names longer than 15 bytes or containing a NUL byte cause
+    /// [`build`](TunBuilder::build) to return an error.
     pub fn name(mut self, name: &str) -> Self {
         self.name = name.into();
         self
@@ -73,7 +75,8 @@ impl TunBuilder {
     /// Builds multiple instances of [`Tun`](struct.Tun.html) with `IFF_MULTI_QUEUE` flag.
     ///
     /// Internally this creates multiple file descriptors to parallelize packet sending and receiving.
-    /// Default value is `1`.
+    /// The value must be between `1` and `256` inclusive; otherwise
+    /// [`build`](TunBuilder::build) returns an error. Default value is `1`.
     pub fn queues(mut self, queues: usize) -> Self {
         self.queues = Some(queues);
         self
@@ -121,36 +124,89 @@ impl TunBuilder {
         self
     }
 
-    /// Sets IPv4 address of device.
+    /// Adds an IPv4 or IPv6 address to the device.
     ///
-    /// Sending packets to this address is how they are delivered to your program.
-    /// This includes routing via this address.
-    pub fn address(mut self, address: Ipv4Addr) -> Self {
-        self.address = Some(address);
+    /// This method can be called multiple times to assign multiple addresses.
+    /// Every address has its own prefix length, so addresses do not share a
+    /// netmask. `prefix_len` must be at most `32` for IPv4 addresses and at
+    /// most `128` for IPv6 addresses. Prefix length `0` and unspecified,
+    /// loopback, multicast, or broadcast addresses are rejected.
+    ///
+    /// ```no_run
+    /// use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    /// use tokio_tun::Tun;
+    ///
+    /// let tun = Tun::builder()
+    ///     .address(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 24)
+    ///     .address(IpAddr::V6(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1)), 64)
+    ///     .up()
+    ///     .build()
+    ///     .unwrap()
+    ///     .pop()
+    ///     .unwrap();
+    /// ```
+    pub fn address(mut self, address: IpAddr, prefix_len: u8) -> Self {
+        self.addresses.push(AddressConfig {
+            address,
+            prefix_len,
+            destination: None,
+            broadcast: None,
+        });
         self
     }
 
-    /// Sets IPv4 destination address of device.
+    /// Sets the point-to-point destination address for the most recently added
+    /// address.
     ///
-    /// Defining a destination address results in the device only being "connected" to that address.
-    /// In practice this means that some routing mechanisms (like ARP and NDP lookups) are skipped
-    /// because this device can only reach the destination address.
+    /// Both IPv4 and IPv6 destinations are supported, but the destination
+    /// family must match the family of the address it belongs to. Call
+    /// [`address`](TunBuilder::address) before this method; otherwise
+    /// [`build`](TunBuilder::build) returns an error.
     ///
-    /// See the [linux manpage](https://man7.org/linux/man-pages/man7/netdevice.7.html) under section *SIOCGIFDSTADDR, SIOCSIFDSTADDR* for an official description.
-    pub fn destination(mut self, dst: Ipv4Addr) -> Self {
-        self.destination = Some(dst);
+    /// ```no_run
+    /// use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    /// use tokio_tun::Tun;
+    ///
+    /// let tun = Tun::builder()
+    ///     .address(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 24)
+    ///     .destination(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)))
+    ///     .address(IpAddr::V6(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1)), 64)
+    ///     .destination(IpAddr::V6(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2)))
+    ///     .up()
+    ///     .build()
+    ///     .unwrap()
+    ///     .pop()
+    ///     .unwrap();
+    /// ```
+    pub fn destination(mut self, destination: IpAddr) -> Self {
+        if let Some(config) = self.addresses.last_mut() {
+            if config.address.is_ipv4() == destination.is_ipv4() {
+                config.destination = Some(destination);
+            } else {
+                self.invalid_reason =
+                    Some("destination address family must match the most recently added address");
+            }
+        } else {
+            self.invalid_reason = Some("destination requires a preceding address");
+        }
         self
     }
 
-    /// Sets IPv4 broadcast address of device.
+    /// Sets the IPv4 broadcast address for the most recently added address.
+    ///
+    /// IPv6 has no broadcast address, so the most recently added address must
+    /// be an IPv4 address. Call [`address`](TunBuilder::address) before this
+    /// method; otherwise [`build`](TunBuilder::build) returns an error.
     pub fn broadcast(mut self, broadcast: Ipv4Addr) -> Self {
-        self.broadcast = Some(broadcast);
-        self
-    }
-
-    /// Sets IPv4 netmask address of device.
-    pub fn netmask(mut self, netmask: Ipv4Addr) -> Self {
-        self.netmask = Some(netmask);
+        if let Some(config) = self.addresses.last_mut() {
+            if config.address.is_ipv4() {
+                config.broadcast = Some(broadcast);
+            } else {
+                self.invalid_reason = Some("broadcast requires a preceding IPv4 address");
+            }
+        } else {
+            self.invalid_reason = Some("broadcast requires a preceding address");
+        }
         self
     }
 
@@ -193,11 +249,49 @@ impl TunBuilder {
     }
 
     /// Builds a new instance of [`Tun`](struct.Tun.html).
+    ///
+    /// This method must be called from within a Tokio runtime with I/O enabled.
     pub fn build(self) -> Result<Vec<Tun>> {
+        self.validate()?;
         match self.queues {
             Some(queues) if queues > 1 => Tun::new_mq(self.into(), queues),
             _ => Tun::new(self.into()).map(|tun| vec![tun]),
         }
+    }
+
+    fn validate(&self) -> Result<()> {
+        if let Some(reason) = self.invalid_reason {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, reason).into());
+        }
+        if !self.name.is_empty() {
+            if self.name.len() > MAX_INTERFACE_NAME_LEN {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "interface name must not exceed 15 bytes",
+                )
+                .into());
+            }
+            if self.name.contains('\0') {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "interface name must not contain a NUL byte",
+                )
+                .into());
+            }
+        }
+        if matches!(self.queues, Some(queues) if queues == 0 || queues > MAX_QUEUES) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "queues must be between 1 and 256",
+            )
+            .into());
+        }
+        for address in &self.addresses {
+            address
+                .validate()
+                .map_err(|reason| std::io::Error::new(std::io::ErrorKind::InvalidInput, reason))?;
+        }
+        Ok(())
     }
 }
 
@@ -222,10 +316,7 @@ impl From<TunBuilder> for Params {
             mtu: builder.mtu,
             owner: builder.owner,
             group: builder.group,
-            address: builder.address,
-            destination: builder.destination,
-            broadcast: builder.broadcast,
-            netmask: builder.netmask,
+            addresses: builder.addresses,
             cloexec: builder.cloexec,
         }
     }
@@ -233,5 +324,154 @@ impl From<TunBuilder> for Params {
     #[cfg(not(any(target_os = "linux")))]
     fn from(builder: TunBuilder) -> Self {
         unimplemented!()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    fn v4(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(a, b, c, d))
+    }
+
+    fn v6(address: &str) -> IpAddr {
+        IpAddr::V6(address.parse::<Ipv6Addr>().unwrap())
+    }
+
+    fn assert_invalid_input<T>(result: Result<T>) {
+        match result {
+            Err(crate::Error::IoError(err)) => {
+                assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput)
+            }
+            Err(_) => panic!("expected an invalid input error"),
+            Ok(_) => panic!("expected an error"),
+        }
+    }
+
+    #[test]
+    fn address_accumulates_in_order() {
+        let builder = TunBuilder::new()
+            .address(v4(10, 0, 0, 1), 24)
+            .address(v6("fd00::1"), 64);
+
+        assert_eq!(builder.addresses.len(), 2);
+        assert_eq!(builder.addresses[0].address, v4(10, 0, 0, 1));
+        assert_eq!(builder.addresses[0].prefix_len, 24);
+        assert_eq!(builder.addresses[1].address, v6("fd00::1"));
+        assert_eq!(builder.addresses[1].prefix_len, 64);
+    }
+
+    #[test]
+    fn destination_attaches_to_most_recent_address() {
+        let builder = TunBuilder::new()
+            .address(v4(10, 0, 0, 1), 24)
+            .destination(v4(10, 0, 0, 2))
+            .address(v6("fd00::1"), 64)
+            .destination(v6("fd00::2"));
+
+        assert_eq!(builder.addresses[0].destination, Some(v4(10, 0, 0, 2)));
+        assert_eq!(builder.addresses[1].destination, Some(v6("fd00::2")));
+    }
+
+    #[test]
+    fn broadcast_attaches_to_most_recent_ipv4_address() {
+        let builder = TunBuilder::new()
+            .address(v4(10, 0, 0, 1), 24)
+            .broadcast(Ipv4Addr::new(10, 0, 0, 255));
+
+        assert_eq!(
+            builder.addresses[0].broadcast,
+            Some(Ipv4Addr::new(10, 0, 0, 255))
+        );
+    }
+
+    #[test]
+    fn build_rejects_ipv4_prefix_above_32() {
+        assert_invalid_input(TunBuilder::new().address(v4(10, 0, 0, 1), 33).build());
+    }
+
+    #[test]
+    fn build_rejects_ipv6_prefix_above_128() {
+        assert_invalid_input(TunBuilder::new().address(v6("fd00::1"), 129).build());
+    }
+
+    #[test]
+    fn build_rejects_mismatched_destination_family() {
+        assert_invalid_input(
+            TunBuilder::new()
+                .address(v4(10, 0, 0, 1), 24)
+                .destination(v6("fd00::2"))
+                .build(),
+        );
+    }
+
+    #[test]
+    fn build_rejects_destination_without_address() {
+        assert_invalid_input(TunBuilder::new().destination(v4(10, 0, 0, 2)).build());
+    }
+
+    #[test]
+    fn build_rejects_broadcast_for_ipv6() {
+        assert_invalid_input(
+            TunBuilder::new()
+                .address(v6("fd00::1"), 64)
+                .broadcast(Ipv4Addr::new(10, 0, 0, 255))
+                .build(),
+        );
+    }
+
+    #[test]
+    fn build_rejects_unspecified_address() {
+        assert_invalid_input(TunBuilder::new().address(v4(0, 0, 0, 0), 0).build());
+    }
+
+    #[test]
+    fn build_rejects_unspecified_destination() {
+        assert_invalid_input(
+            TunBuilder::new()
+                .address(v4(10, 0, 0, 1), 24)
+                .destination(v4(0, 0, 0, 0))
+                .build(),
+        );
+    }
+
+    #[test]
+    fn build_rejects_destination_equal_to_address() {
+        assert_invalid_input(
+            TunBuilder::new()
+                .address(v4(10, 0, 0, 1), 24)
+                .destination(v4(10, 0, 0, 1))
+                .build(),
+        );
+    }
+
+    #[test]
+    fn build_rejects_invalid_names() {
+        assert_invalid_input(TunBuilder::new().name("abcdefghijklmnop").build());
+        assert_invalid_input(TunBuilder::new().name("tun0\0evil").build());
+    }
+
+    #[test]
+    fn build_rejects_invalid_queue_counts() {
+        assert_invalid_input(TunBuilder::new().queues(0).build());
+        assert_invalid_input(TunBuilder::new().queues(257).build());
+    }
+
+    #[test]
+    fn validate_accepts_maximum_prefix_lengths() {
+        assert!(
+            TunBuilder::new()
+                .address(v4(10, 0, 0, 1), 32)
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            TunBuilder::new()
+                .address(v6("fd00::1"), 128)
+                .validate()
+                .is_ok()
+        );
     }
 }

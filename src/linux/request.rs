@@ -62,10 +62,11 @@ impl ifreq {
     pub fn new(name: &str) -> Self {
         let mut req: ifreq = unsafe { mem::zeroed() };
         if !name.is_empty() {
-            let len = name.len().min(IFNAMSIZ as usize - 1);
-            // Done just to make sure we don't truncate
-            // on an UTF-8 code point boundary.
-            let name = &name[..len];
+            let mut len = name.len().min(IFNAMSIZ as usize - 1);
+            // Do not split a UTF-8 code point.
+            while len > 0 && !name.is_char_boundary(len) {
+                len -= 1;
+            }
             unsafe {
                 ptr::copy_nonoverlapping(
                     name.as_ptr().cast::<c_char>(),
@@ -77,10 +78,9 @@ impl ifreq {
         req
     }
 
-    pub fn name(&self) -> &str {
-        unsafe {
-            str::from_utf8_unchecked(CStr::from_ptr(self.ifr_ifrn.ifrn_name.as_ptr()).to_bytes())
-        }
+    pub fn name(&self) -> std::result::Result<&str, std::str::Utf8Error> {
+        let bytes = unsafe { CStr::from_ptr(self.ifr_ifrn.ifrn_name.as_ptr()).to_bytes() };
+        str::from_utf8(bytes)
     }
 }
 
@@ -91,13 +91,19 @@ mod tests {
     #[test]
     fn test_ifreq_name_and_truncation() {
         let req = ifreq::new("tun0");
-        assert_eq!(req.name(), "tun0");
+        assert_eq!(req.name().unwrap(), "tun0");
 
         let overlong = ifreq::new("12345678901234567890");
-        assert_eq!(overlong.name(), "123456789012345");
-        assert_eq!(overlong.name().len(), 15);
+        assert_eq!(overlong.name().unwrap(), "123456789012345");
+        assert_eq!(overlong.name().unwrap().len(), 15);
 
         let empty = ifreq::new("");
-        assert_eq!(empty.name(), "");
+        assert_eq!(empty.name().unwrap(), "");
+    }
+
+    #[test]
+    fn test_ifreq_does_not_split_utf8_code_points() {
+        let req = ifreq::new("aaaaaaaaaaaaaaé");
+        assert_eq!(req.name().unwrap(), "aaaaaaaaaaaaaa");
     }
 }

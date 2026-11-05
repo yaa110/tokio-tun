@@ -1,13 +1,14 @@
 use crate::Result;
 use crate::TunBuilder;
-use crate::linux::interface::Interface;
+use crate::address::AddressInfo;
+use crate::linux::interface::{Interface, set_persist};
 use crate::linux::io::TunIo;
 use crate::linux::params::Params;
 use std::io::{self, ErrorKind, IoSlice, Read, Write};
-use std::mem;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
+use std::os::fd::OwnedFd;
 use std::os::raw::c_char;
-use std::os::unix::io::{AsRawFd, RawFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{self, Context, Poll};
@@ -15,6 +16,12 @@ use tokio::io::unix::AsyncFd;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 static TUN: &[u8] = b"/dev/net/tun\0";
+
+fn close_fds(fds: &[i32]) {
+    for &fd in fds {
+        unsafe { libc::close(fd) };
+    }
+}
 
 // Taken from the `futures` crate
 macro_rules! ready {
@@ -114,30 +121,70 @@ impl Tun {
 
     /// Creates a new instance of Tun/Tap device.
     pub(crate) fn new(params: Params) -> Result<Self> {
-        let iface = Self::allocate(params, 1)?;
-        let fd = iface.files()[0];
-        // SAFETY: `fd` is an open and valid file descriptor owned by `TunIo`,
-        // which remains valid for the lifetime of `AsyncFd`.
-        let io = unsafe { AsyncFd::register(TunIo::from(fd)) }.map_err(io::Error::from)?;
-        Ok(Self {
+        let persist = params.persist;
+        let mut iface = Self::allocate(params, 1)?;
+        let mut fds: Vec<OwnedFd> = iface
+            .take_files()
+            .into_iter()
+            .map(|fd| unsafe { OwnedFd::from_raw_fd(fd) })
+            .collect();
+        let fd = fds.pop().expect("exactly one file descriptor");
+        // SAFETY: `fd` is an open and valid file descriptor whose ownership is
+        // transferred to `TunIo`, and it remains valid for the lifetime of
+        // `AsyncFd`.
+        let io = unsafe { AsyncFd::register(TunIo::from_raw_fd(fd.into_raw_fd())) }
+            .map_err(io::Error::from)?;
+        let tun = Self {
             iface: Arc::new(iface),
             io,
-        })
+        };
+        if persist {
+            if let Err(err) = set_persist(tun.as_raw_fd(), true) {
+                let _ = set_persist(tun.as_raw_fd(), false);
+                return Err(err);
+            }
+        }
+        Ok(tun)
     }
 
     /// Creates a new instance of Tun/Tap device.
     pub(crate) fn new_mq(params: Params, queues: usize) -> Result<Vec<Self>> {
-        let iface = Self::allocate(params, queues)?;
+        if queues == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "queues must be at least 1",
+            )
+            .into());
+        }
+        let persist = params.persist;
+        let mut iface = Self::allocate(params, queues)?;
+        let fds: Vec<OwnedFd> = iface
+            .take_files()
+            .into_iter()
+            .map(|fd| unsafe { OwnedFd::from_raw_fd(fd) })
+            .collect();
         let mut tuns = Vec::with_capacity(queues);
         let iface = Arc::new(iface);
-        for &fd in iface.files() {
-            // SAFETY: `fd` is an open and valid file descriptor owned by `TunIo`,
-            // which remains valid for the lifetime of `AsyncFd`.
-            let io = unsafe { AsyncFd::register(TunIo::from(fd)) }.map_err(io::Error::from)?;
+        for fd in fds {
+            // SAFETY: `fd` is an open and valid file descriptor whose ownership
+            // is transferred to `TunIo`, and it remains valid for the lifetime
+            // of `AsyncFd`.
+            let io = unsafe { AsyncFd::register(TunIo::from_raw_fd(fd.into_raw_fd())) }
+                .map_err(io::Error::from)?;
             tuns.push(Self {
                 iface: iface.clone(),
                 io,
-            })
+            });
+        }
+        if persist {
+            for tun in &tuns {
+                if let Err(err) = set_persist(tun.as_raw_fd(), true) {
+                    for tun in &tuns {
+                        let _ = set_persist(tun.as_raw_fd(), false);
+                    }
+                    return Err(err);
+                }
+            }
         }
         Ok(tuns)
     }
@@ -145,17 +192,21 @@ impl Tun {
     fn allocate(params: Params, queues: usize) -> Result<Interface> {
         let extra_flags = if params.cloexec { libc::O_CLOEXEC } else { 0 };
 
-        let fds = (0..queues)
-            .map(|_| unsafe {
-                match libc::open(
+        let mut fds = Vec::with_capacity(queues);
+        for _ in 0..queues {
+            let fd = unsafe {
+                libc::open(
                     TUN.as_ptr().cast::<c_char>(),
                     libc::O_RDWR | libc::O_NONBLOCK | extra_flags,
-                ) {
-                    fd if fd >= 0 => Ok(fd),
-                    _ => Err(io::Error::last_os_error().into()),
-                }
-            })
-            .collect::<Result<Vec<_>>>()?;
+                )
+            };
+            if fd < 0 {
+                let err = io::Error::last_os_error();
+                close_fds(&fds);
+                return Err(err.into());
+            }
+            fds.push(fd);
+        }
 
         let iface = Interface::new(
             fds,
@@ -202,8 +253,7 @@ impl Tun {
             match self.send(remaining).await? {
                 0 => return Err(ErrorKind::WriteZero.into()),
                 n => {
-                    let (_, rest) = mem::take(&mut remaining).split_at(n);
-                    remaining = rest;
+                    remaining = &remaining[n..];
                 }
             }
         }
@@ -295,24 +345,74 @@ impl Tun {
         self.iface.mtu(None)
     }
 
-    /// Returns the IPv4 address of MTU.
-    pub fn address(&self) -> Result<Ipv4Addr> {
-        self.iface.address(None)
+    /// Returns all IPv4 and IPv6 addresses assigned to the device.
+    ///
+    /// Each entry contains the address, its prefix length, and any configured
+    /// point-to-point destination or IPv4 broadcast address.
+    ///
+    /// This method performs a synchronous netlink dump and should not be called
+    /// from latency-sensitive async code.
+    ///
+    /// ```no_run
+    /// # use tokio_tun::Tun;
+    /// # fn show(tun: &Tun) {
+    /// for address in tun.addresses().unwrap() {
+    ///     println!(
+    ///         "{} /{} destination={:?} broadcast={:?}",
+    ///         address.address,
+    ///         address.prefix_len,
+    ///         address.destination,
+    ///         address.broadcast,
+    ///     );
+    /// }
+    /// # }
+    /// ```
+    pub fn addresses(&self) -> Result<Vec<AddressInfo>> {
+        self.iface.addresses()
     }
 
-    /// Returns the IPv4 destination address of MTU.
-    pub fn destination(&self) -> Result<Ipv4Addr> {
-        self.iface.destination(None)
+    /// Returns the primary address assigned to the device.
+    ///
+    /// The first IPv4 address reported by the system is returned when one
+    /// exists; otherwise the first reported address (which may be IPv6) is
+    /// returned. Use [`addresses`](Tun::addresses) to retrieve every address.
+    pub fn address(&self) -> Result<IpAddr> {
+        let addresses = self.addresses()?;
+        addresses
+            .iter()
+            .find(|info| info.address.is_ipv4())
+            .or_else(|| addresses.first())
+            .map(|info| info.address)
+            .ok_or_else(|| {
+                io::Error::new(ErrorKind::AddrNotAvailable, "interface has no address").into()
+            })
     }
 
-    /// Returns the IPv4 broadcast address of MTU.
+    /// Returns the first point-to-point destination address of the device.
+    ///
+    /// The result is the first peer reported by the system, not necessarily
+    /// the first one configured.
+    pub fn destination(&self) -> Result<IpAddr> {
+        self.addresses()?
+            .iter()
+            .find_map(|info| info.destination)
+            .ok_or_else(|| {
+                io::Error::new(
+                    ErrorKind::AddrNotAvailable,
+                    "interface has no destination address",
+                )
+                .into()
+            })
+    }
+
+    /// Returns the IPv4 broadcast address of the device.
     pub fn broadcast(&self) -> Result<Ipv4Addr> {
-        self.iface.broadcast(None)
+        self.iface.broadcast()
     }
 
-    /// Returns the IPv4 netmask address of MTU.
+    /// Returns the IPv4 netmask of the device.
     pub fn netmask(&self) -> Result<Ipv4Addr> {
-        self.iface.netmask(None)
+        self.iface.netmask()
     }
 
     /// Returns the flags of MTU.
@@ -330,11 +430,32 @@ mod tests {
     use tokio::time::{Duration, timeout};
 
     fn socket_pair_tun() -> (Tun, UnixStream) {
+        socket_pair_tun_with_sndbuf(None)
+    }
+
+    fn socket_pair_tun_with_sndbuf(sndbuf: Option<libc::c_int>) -> (Tun, UnixStream) {
         let (writer, reader) = UnixStream::pair().unwrap();
         writer.set_nonblocking(true).unwrap();
+        if let Some(sndbuf) = sndbuf {
+            let rc = unsafe {
+                libc::setsockopt(
+                    writer.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_SNDBUF,
+                    &sndbuf as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&sndbuf) as libc::socklen_t,
+                )
+            };
+            assert_eq!(
+                rc,
+                0,
+                "setsockopt(SO_SNDBUF) failed: {}",
+                std::io::Error::last_os_error()
+            );
+        }
         // SAFETY: `writer` is a valid open file descriptor that is converted into
         // a raw fd and owned by `TunIo` for the lifetime of `AsyncFd`.
-        let io = unsafe { AsyncFd::register(TunIo::from(writer.into_raw_fd())) }.unwrap();
+        let io = unsafe { AsyncFd::register(TunIo::from_raw_fd(writer.into_raw_fd())) }.unwrap();
         // No TUN device is configured by this fixture. The empty interface is
         // only metadata; I/O uses a non-fsyncable socket pair.
         let iface = Arc::new(Interface::new(Vec::new(), "", 0, false).unwrap());
@@ -360,5 +481,44 @@ mod tests {
         let mut second = [0; 6];
         reader.read_exact(&mut second).unwrap();
         assert_eq!(&second, b"second");
+    }
+
+    #[tokio::test]
+    async fn send_all_advances_after_partial_writes() {
+        const PAYLOAD_LEN: usize = 1024 * 1024;
+
+        // A tiny send buffer forces the non-blocking socket to accept only part
+        // of each write, exercising the slice advancement in `send_all`.
+        let (tun, mut reader) = socket_pair_tun_with_sndbuf(Some(4096));
+        reader.set_nonblocking(true).unwrap();
+
+        let payload: Vec<u8> = (0..PAYLOAD_LEN).map(|i| (i % 251) as u8).collect();
+        let expected = payload.clone();
+
+        let reader_task = tokio::task::spawn_blocking(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let mut received = Vec::with_capacity(expected.len());
+            let mut buf = [0u8; 16 * 1024];
+            while received.len() < expected.len() && std::time::Instant::now() < deadline {
+                match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => received.extend_from_slice(&buf[..n]),
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                    Err(err) => panic!("read failed: {err}"),
+                }
+            }
+            received
+        });
+
+        timeout(Duration::from_secs(5), tun.send_all(&payload))
+            .await
+            .expect("send_all timed out")
+            .expect("send_all failed");
+
+        let received = reader_task.await.expect("reader task panicked");
+        assert_eq!(received.len(), payload.len());
+        assert_eq!(received, payload);
     }
 }

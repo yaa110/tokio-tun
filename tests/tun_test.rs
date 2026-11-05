@@ -1,5 +1,5 @@
 use std::io::IoSlice;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::os::unix::io::AsRawFd;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UdpSocket;
@@ -9,19 +9,29 @@ macro_rules! skip_without_cap_net_admin {
     ($expr:expr) => {
         match $expr {
             Ok(val) => val,
-            Err(tokio_tun::Error::NixError(nix::errno::Errno::EPERM)) => {
-                eprintln!("Skipping test: missing CAP_NET_ADMIN or root privileges");
+            Err(err) => {
+                let can_skip = matches!(
+                    &err,
+                    tokio_tun::Error::NixError(nix::errno::Errno::EPERM)
+                ) || matches!(
+                    &err,
+                    tokio_tun::Error::IoError(e)
+                        if e.kind() == std::io::ErrorKind::PermissionDenied
+                            || e.raw_os_error() == Some(libc::EPERM)
+                            || e.kind() == std::io::ErrorKind::NotFound
+                );
+
+                if !can_skip {
+                    panic!("Unexpected error creating TUN device: {err:?}");
+                }
+                if std::env::var_os("TOKIO_TUN_REQUIRE_PRIVILEGED").is_some() {
+                    panic!("Privileged TUN test required but unavailable: {err:?}");
+                }
+                eprintln!(
+                    "Skipping test: missing CAP_NET_ADMIN, /dev/net/tun, or permission"
+                );
                 return;
             }
-            Err(tokio_tun::Error::IoError(ref e))
-                if e.kind() == std::io::ErrorKind::PermissionDenied
-                    || e.raw_os_error() == Some(libc::EPERM)
-                    || e.kind() == std::io::ErrorKind::NotFound =>
-            {
-                eprintln!("Skipping test: /dev/net/tun unavailable or permission denied");
-                return;
-            }
-            Err(e) => panic!("Unexpected error creating TUN device: {e:?}"),
         }
     };
 }
@@ -48,9 +58,8 @@ async fn test_tun_config_getters() {
     let tun = skip_without_cap_net_admin!(
         Tun::builder()
             .name("tuncfg0")
-            .address(Ipv4Addr::new(10, 50, 0, 1))
-            .netmask(Ipv4Addr::new(255, 255, 255, 0))
-            .destination(Ipv4Addr::new(10, 50, 0, 2))
+            .address(IpAddr::V4(Ipv4Addr::new(10, 50, 0, 1)), 24)
+            .destination(IpAddr::V4(Ipv4Addr::new(10, 50, 0, 2)))
             .broadcast(Ipv4Addr::new(10, 50, 0, 255))
             .mtu(1420)
             .up()
@@ -61,12 +70,129 @@ async fn test_tun_config_getters() {
     .expect("tun instance");
 
     assert_eq!(tun.name(), "tuncfg0");
-    assert_eq!(tun.address().unwrap(), Ipv4Addr::new(10, 50, 0, 1));
+    assert_eq!(
+        tun.address().unwrap(),
+        IpAddr::V4(Ipv4Addr::new(10, 50, 0, 1))
+    );
     assert_eq!(tun.netmask().unwrap(), Ipv4Addr::new(255, 255, 255, 0));
-    assert_eq!(tun.destination().unwrap(), Ipv4Addr::new(10, 50, 0, 2));
+    assert_eq!(
+        tun.destination().unwrap(),
+        IpAddr::V4(Ipv4Addr::new(10, 50, 0, 2))
+    );
     assert_eq!(tun.broadcast().unwrap(), Ipv4Addr::new(10, 50, 0, 255));
     assert_eq!(tun.mtu().unwrap(), 1420);
     assert!(tun.flags().unwrap() & libc::IFF_UP as i16 != 0);
+}
+
+#[tokio::test]
+async fn test_multiple_ipv4_and_ipv6_addresses() {
+    let tun = skip_without_cap_net_admin!(
+        Tun::builder()
+            .name("tunmulti0")
+            .address(IpAddr::V4(Ipv4Addr::new(10, 80, 0, 1)), 24)
+            .destination(IpAddr::V4(Ipv4Addr::new(10, 80, 0, 2)))
+            .broadcast(Ipv4Addr::new(10, 80, 0, 255))
+            .address(IpAddr::V4(Ipv4Addr::new(10, 81, 0, 1)), 24)
+            .address(IpAddr::V6("fd00:80::1".parse().unwrap()), 64)
+            .destination(IpAddr::V6("fd00:80::2".parse().unwrap()))
+            .address(IpAddr::V6("fd00:81::1".parse().unwrap()), 64)
+            .up()
+            .build()
+    )
+    .pop()
+    .expect("tun instance");
+
+    let addresses = tun.addresses().unwrap();
+
+    let first_v4 = addresses
+        .iter()
+        .find(|info| info.address == IpAddr::V4(Ipv4Addr::new(10, 80, 0, 1)))
+        .expect("first IPv4 address");
+    assert_eq!(first_v4.prefix_len, 24);
+    assert_eq!(
+        first_v4.destination,
+        Some(IpAddr::V4(Ipv4Addr::new(10, 80, 0, 2)))
+    );
+    assert_eq!(first_v4.broadcast, Some(Ipv4Addr::new(10, 80, 0, 255)));
+
+    assert!(addresses.iter().any(|info| {
+        info.address == IpAddr::V4(Ipv4Addr::new(10, 81, 0, 1)) && info.prefix_len == 24
+    }));
+
+    let first_v6 = addresses
+        .iter()
+        .find(|info| info.address == IpAddr::V6("fd00:80::1".parse().unwrap()))
+        .expect("first IPv6 address");
+    assert_eq!(first_v6.prefix_len, 64);
+    assert_eq!(
+        first_v6.destination,
+        Some(IpAddr::V6("fd00:80::2".parse().unwrap()))
+    );
+
+    assert!(addresses.iter().any(|info| {
+        info.address == IpAddr::V6("fd00:81::1".parse().unwrap()) && info.prefix_len == 64
+    }));
+
+    let primary = tun.address().unwrap();
+    assert!(
+        primary == IpAddr::V4(Ipv4Addr::new(10, 80, 0, 1))
+            || primary == IpAddr::V4(Ipv4Addr::new(10, 81, 0, 1))
+    );
+
+    let destination = tun.destination().unwrap();
+    assert!(
+        destination == IpAddr::V4(Ipv4Addr::new(10, 80, 0, 2))
+            || destination == IpAddr::V6("fd00:80::2".parse().unwrap())
+    );
+}
+
+#[tokio::test]
+async fn test_tap_auto_broadcast() {
+    let tap = skip_without_cap_net_admin!(
+        Tun::builder()
+            .name("tapbrd0")
+            .tap()
+            .address(IpAddr::V4(Ipv4Addr::new(10, 230, 0, 1)), 24)
+            .up()
+            .build()
+    )
+    .pop()
+    .expect("tap instance");
+
+    assert_eq!(tap.broadcast().unwrap(), Ipv4Addr::new(10, 230, 0, 255));
+    assert!(tap.addresses().unwrap().iter().any(|info| {
+        info.address == IpAddr::V4(Ipv4Addr::new(10, 230, 0, 1))
+            && info.broadcast == Some(Ipv4Addr::new(10, 230, 0, 255))
+    }));
+}
+
+#[tokio::test]
+async fn test_failed_build_does_not_leave_interface() {
+    let _check = skip_without_cap_net_admin!(Tun::builder().name("").build());
+
+    for name in ["tunleak0", "tunleak1"] {
+        assert!(Tun::builder().name(name).mtu(-1).build().is_err());
+        assert_eq!(
+            interface_index(name),
+            0,
+            "failed build left interface {name}"
+        );
+    }
+
+    assert!(
+        Tun::builder()
+            .name("tunleak2")
+            .persist()
+            .mtu(-1)
+            .build()
+            .is_err()
+    );
+    assert_eq!(interface_index("tunleak2"), 0);
+}
+
+fn interface_index(name: &str) -> u32 {
+    let name = std::ffi::CString::new(name).unwrap();
+    unsafe { libc::if_nametoindex(name.as_ptr()) }
 }
 
 #[tokio::test]
@@ -105,9 +231,8 @@ async fn test_packet_info() {
     let tun = skip_without_cap_net_admin!(
         Tun::builder()
             .name("tunpi0")
-            .address(Ipv4Addr::new(10, 60, 0, 1))
-            .netmask(Ipv4Addr::new(255, 255, 255, 0))
-            .destination(Ipv4Addr::new(10, 60, 0, 2))
+            .address(IpAddr::V4(Ipv4Addr::new(10, 60, 0, 1)), 24)
+            .destination(IpAddr::V4(Ipv4Addr::new(10, 60, 0, 2)))
             .packet_info()
             .up()
             .build()
@@ -129,14 +254,14 @@ async fn test_packet_info() {
             .expect("send_to");
         if let Ok(Ok(n)) =
             tokio::time::timeout(std::time::Duration::from_millis(300), tun.recv(&mut buf)).await
-            && n >= 4
-            && buf[4..n].windows(payload.len()).any(|w| w == payload)
         {
-            // Packet info adds 4 bytes prefix: 2 bytes flags, 2 bytes proto (ETH_P_IP = 0x0800)
-            let proto = u16::from_be_bytes([buf[2], buf[3]]);
-            assert_eq!(proto, libc::ETH_P_IP as u16);
-            found = true;
-            break;
+            if n >= 4 && buf[4..n].windows(payload.len()).any(|w| w == payload) {
+                // Packet info adds 4 bytes prefix: 2 bytes flags, 2 bytes proto (ETH_P_IP = 0x0800)
+                let proto = u16::from_be_bytes([buf[2], buf[3]]);
+                assert_eq!(proto, libc::ETH_P_IP as u16);
+                found = true;
+                break;
+            }
         }
     }
     assert!(found, "expected payload with packet_info not received");
@@ -147,9 +272,8 @@ async fn test_async_read_write_traits() {
     let mut tun = skip_without_cap_net_admin!(
         Tun::builder()
             .name("tunrw0")
-            .address(Ipv4Addr::new(10, 70, 0, 1))
-            .netmask(Ipv4Addr::new(255, 255, 255, 0))
-            .destination(Ipv4Addr::new(10, 70, 0, 2))
+            .address(IpAddr::V4(Ipv4Addr::new(10, 70, 0, 1)), 24)
+            .destination(IpAddr::V4(Ipv4Addr::new(10, 70, 0, 2)))
             .up()
             .build()
     )
@@ -169,10 +293,11 @@ async fn test_async_read_write_traits() {
             .expect("send_to");
         if let Ok(Ok(n)) =
             tokio::time::timeout(std::time::Duration::from_millis(300), tun.read(&mut buf)).await
-            && buf[..n].windows(payload.len()).any(|w| w == payload)
         {
-            received_len = n;
-            break;
+            if buf[..n].windows(payload.len()).any(|w| w == payload) {
+                received_len = n;
+                break;
+            }
         }
     }
     assert!(received_len > 0, "payload not received through AsyncRead");
