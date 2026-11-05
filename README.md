@@ -9,6 +9,9 @@ Asynchronous allocation of TUN/TAP devices in Rust using [`tokio`](https://crate
 - Create a tun device using `Tun::builder()` and read from it in a loop:
 
 ```rust
+use std::sync::Arc;
+use tokio_tun::Tun;
+
 #[tokio::main]
 async fn main() {
     let tun = Arc::new(
@@ -16,6 +19,8 @@ async fn main() {
             .name("")            // if name is empty, then it is set by kernel.
             .tap()               // uses TAP instead of TUN (default).
             .packet_info()       // avoids setting IFF_NO_PI.
+            .address("10.0.0.1".parse().unwrap(), 24) // can be called multiple times.
+            .destination("10.0.0.2".parse().unwrap())
             .up()                // or set it up manually using `sudo ip link set <tun-name> up`.
             .close_on_exec()     // or no_close_on_exec()
             .build()
@@ -55,11 +60,54 @@ async fn main() {
 sudo -E $(which cargo) run
 ```
 
-- Set the address of device (address and netmask could also be set using `TunBuilder`):
+### Multiple addresses and IPv6
 
-```bash
-sudo ip a add 10.0.0.1/24 dev <tun-name>
+`TunBuilder::address` accepts `std::net::IpAddr` and can be called multiple
+times. Every call carries its own prefix length, so IPv4 and IPv6 addresses are
+independent. `destination` configures the point-to-point peer of the most
+recently added address. `broadcast` also applies to the most recently added
+address and is available for IPv4 only, because IPv6 has no broadcast address.
+
+```rust
+use tokio_tun::Tun;
+
+let tun = Tun::builder()
+    .name("")
+    // Two IPv4 addresses with independent prefixes.
+    .address("10.0.0.1".parse().unwrap(), 24)
+    .destination("10.0.0.2".parse().unwrap())
+    .address("10.0.1.1".parse().unwrap(), 24)
+    // Two IPv6 addresses with independent prefixes.
+    .address("fd00::1".parse().unwrap(), 64)
+    .destination("fd00::2".parse().unwrap())
+    .address("fd00:0:0:1::1".parse().unwrap(), 64)
+    .up()
+    .build()
+    .unwrap()
+    .pop()
+    .unwrap();
+
+for address in tun.addresses().unwrap() {
+    println!(
+        "address: {}, prefix: {}, destination: {:?}, broadcast: {:?}",
+        address.address, address.prefix_len, address.destination, address.broadcast
+    );
+}
 ```
+
+Example output (the kernel also adds a link-local IPv6 address, and ordering may vary):
+
+```text
+address: 10.0.0.1, prefix: 24, destination: Some(10.0.0.2), broadcast: None
+address: 10.0.1.1, prefix: 24, destination: None, broadcast: None
+address: fd00:0:0:1::1, prefix: 64, destination: None, broadcast: None
+address: fd00::1, prefix: 64, destination: Some(fd00::2), broadcast: None
+address: fe80::3545:93f1:f538:3dd1, prefix: 64, destination: None, broadcast: None
+```
+
+The builder-level `netmask` method has been replaced by the prefix length passed
+to `address`. `Tun::netmask()` still returns the netmask of the primary IPv4
+address.
 
 - Ping to read packets:
 
@@ -87,8 +135,10 @@ sudo tshark -i <tun-name>
 
 - [`read`](examples/read.rs): Split tun to (reader, writer) pair and read packets from reader.
 - [`read-mq`](examples/read-mq.rs): Read from multi-queue tun using `tokio::select!`.
+- [`multiple-addresses`](examples/multiple-addresses.rs): Assign multiple IPv4 and IPv6 addresses to one tun.
 
 ```bash
 sudo -E $(which cargo) run --example read
 sudo -E $(which cargo) run --example read-mq
+sudo -E $(which cargo) run --example multiple-addresses
 ```

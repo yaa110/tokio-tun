@@ -17,3 +17,29 @@ jobs:
       - run: cargo fmt -- --check
       - run: cargo clippy
       - run: cargo build
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+      - name: prepare /dev/net/tun
+        run: |
+          sudo mkdir -p /dev/net
+          if [ ! -e /dev/net/tun ]; then sudo mknod /dev/net/tun c 10 200; fi
+          sudo chmod 666 /dev/net/tun
+      - name: run tests with CAP_NET_ADMIN
+        env:
+          TOKIO_TUN_REQUIRE_PRIVILEGED: "1"
+          CARGO_TARGET_DIR: ${{ runner.temp }}/tokio-tun-target
+        run: |
+          sudo env \
+            "PATH=$PATH" \
+            "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" \
+            "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" \
+            "CARGO_TARGET_DIR=$CARGO_TARGET_DIR" \
+            "TOKIO_TUN_REQUIRE_PRIVILEGED=$TOKIO_TUN_REQUIRE_PRIVILEGED" \
+            cargo test

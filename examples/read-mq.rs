@@ -1,4 +1,4 @@
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
 use tokio_tun::Tun;
@@ -11,10 +11,9 @@ async fn main() {
         .name("")
         .mtu(1350)
         .up()
-        .address(Ipv4Addr::new(10, 0, 0, 1))
-        .destination(Ipv4Addr::new(10, 1, 0, 1))
-        .broadcast(Ipv4Addr::BROADCAST)
-        .netmask(Ipv4Addr::new(255, 255, 255, 0))
+        .address(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 24)
+        .destination(IpAddr::V4(Ipv4Addr::new(10, 1, 0, 1)))
+        .broadcast(Ipv4Addr::new(10, 0, 0, 255))
         .queues(queues)
         .build()
         .unwrap();
