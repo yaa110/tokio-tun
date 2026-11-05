@@ -1,0 +1,38 @@
+README.md
+  h_20fc4d483d1064 12-15,23-24,64,70-109,136,141
+examples/multiple-addresses.rs
+  h_20fc4d483d1064 1-42
+examples/read-mq.rs
+  h_20fc4d483d1064 1,14-15
+examples/read.rs
+  h_20fc4d483d1064 1,15-16
+src/address.rs
+  h_20fc4d483d1064 1-46
+src/builder.rs
+  h_20fc4d483d1064 2,9,21-22,38-39,121-126,128-147,151-152,154-157,159-184,188-192,194-202,246,252-263,287,297-392
+src/lib.rs
+  h_20fc4d483d1064 6,11,16
+src/linux/address.rs
+  h_20fc4d483d1064 5-8,16,18-22
+src/linux/interface.rs
+  h_20fc4d483d1064 4-6,58-59,93-102,114,117-118,121,124-125,175-186
+src/linux/netlink.rs
+  h_20fc4d483d1064 1-459
+src/linux/params.rs
+  h_20fc4d483d1064 1,13
+src/tun.rs
+  h_20fc4d483d1064 3,9,299-319,322-350,353,355,358,360
+tests/tun_test.rs
+  h_20fc4d483d1064 2,51-52,63-66,68-71,77-131,168-169,209-210
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "de95a5772bfc9a3bc40e3d11c06bf71b3af7fbf7",
+  "prompts": {},
+  "humans": {
+    "h_20fc4d483d1064": {
+      "author": "Navid <3187511+yaa110@users.noreply.github.com>"
+    }
+  }
+}
