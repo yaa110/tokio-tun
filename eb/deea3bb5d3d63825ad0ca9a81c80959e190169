@@ -1,0 +1,49 @@
+README.md
+  h_20fc4d483d1064 5,7,14,37-39,47-48,50,53,166-168,179-185,187-189,203-278,285-286
+  h_20fc4d483d1064 6,19-28,49,169,186,279
+.github/workflows/build.yml
+  h_20fc4d483d1064 16,22-24,34,39-41
+Cargo.toml
+  h_20fc4d483d1064 13,17-18,21-29
+examples/android/README.md
+  h_20fc4d483d1064 1-62
+examples/android/VpnService.kt
+  h_20fc4d483d1064 1-63
+examples/android/tun_bridge.rs
+  h_20fc4d483d1064 1-97
+examples/ios/PacketTunnelProvider.swift
+  h_20fc4d483d1064 1-166
+examples/ios/README.md
+  h_20fc4d483d1064 1-73
+examples/ios/tun_bridge.rs
+  h_20fc4d483d1064 1-92
+examples/multiple-addresses.rs
+  h_20fc4d483d1064 1,3,5,7,10,41,47-51
+examples/read-mq.rs
+  h_20fc4d483d1064 53-55
+examples/read.rs
+  h_20fc4d483d1064 1,3,5,7,10,46,51,53-55
+src/lib.rs
+  h_20fc4d483d1064 1-7,26-29,31,33-39,41,44,46,48-54,56-57
+src/macos/io.rs
+  h_20fc4d483d1064 70-82,130-142,173-185
+src/queue.rs
+  h_20fc4d483d1064 1-402
+src/raw_io.rs
+  h_20fc4d483d1064 8,50-61,66-77,89-100,107
+src/tun.rs
+  h_20fc4d483d1064 3,13,18,423
+tests/mobile_api.rs
+  h_20fc4d483d1064 1-13
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ebdeea3bb5d3d63825ad0ca9a81c80959e190169",
+  "prompts": {},
+  "humans": {
+    "h_20fc4d483d1064": {
+      "author": "Navid <3187511+yaa110@users.noreply.github.com>"
+    }
+  }
+}
