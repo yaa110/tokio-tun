@@ -1,8 +1,13 @@
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::net::{IpAddr, Ipv4Addr};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::os::unix::io::AsRawFd;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::sync::Arc;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use tokio_tun::Tun;
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::main]
 async fn main() {
     let tun = Arc::new(
@@ -38,18 +43,14 @@ async fn main() {
     println!("---------------------");
 
     // Reader
-    let mut buf = [0u8; 1024];
+    let mut buf = vec![0u8; 65_535];
     loop {
         let n = tun.recv(&mut buf).await.unwrap();
         println!("reading {} bytes: {:?}", n, &buf[..n]);
     }
+}
 
-    // Writer: simply clone Arced Tun.
-    /*
-        let tun_c = tun.clone();
-        tokio::spawn(async move{
-            let buf = b"data to be written";
-            tun_c.send_all(buf).await.unwrap();
-        });
-    */
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn main() {
+    eprintln!("This example requires Linux or macOS.");
 }

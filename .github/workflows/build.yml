@@ -13,11 +13,15 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           components: rustfmt, clippy
+          target: aarch64-linux-android
       - run: cargo test
       - run: cargo fmt -- --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo build
       - run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+      - run: cargo check --target aarch64-linux-android --all-targets
+      - run: cargo clippy --target aarch64-linux-android --all-targets -- -D warnings
+      - run: RUSTDOCFLAGS="-D warnings" cargo doc --target aarch64-linux-android --no-deps
   macos:
     runs-on: macos-latest
     timeout-minutes: 30
@@ -27,10 +31,14 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           components: rustfmt, clippy
+          target: aarch64-apple-ios
       - run: cargo test
       - run: cargo fmt -- --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo build
+      - run: cargo check --target aarch64-apple-ios --all-targets
+      - run: cargo clippy --target aarch64-apple-ios --all-targets -- -D warnings
+      - run: RUSTDOCFLAGS="-D warnings" cargo doc --target aarch64-apple-ios --no-deps
       - name: check macOS API surface
         env:
           RUSTDOCFLAGS: -D warnings
