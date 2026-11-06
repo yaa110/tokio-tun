@@ -14,16 +14,7 @@ version = "0.22.0"
 
 [dependencies]
 libc = "0.2"
-# Caret requirement: >=1.54, <2.0. Users may select any compatible 1.x release.
 tokio = {version = "1.54", features = ["net"]}
 
 [dev-dependencies]
 tokio = {version = "1.54", features = ["full"]}
-
-[[example]]
-name = "android-bridge"
-path = "examples/android/tun_bridge.rs"
-
-[[example]]
-name = "ios-bridge"
-path = "examples/ios/tun_bridge.rs"

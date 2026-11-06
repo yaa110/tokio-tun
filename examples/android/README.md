@@ -1,5 +1,9 @@
 # Android example
 
+These files are not runnable Cargo examples. They are platform integration
+snippets, and their Rust bridge code is compile-checked by
+`tests/mobile_bridges.rs`.
+
 This example shows the minimal public-API path for using `tokio-tun` on
 Android. Android does not allow apps to open `/dev/net/tun`; the system
 provides a TUN descriptor through `VpnService`.

@@ -1,5 +1,9 @@
 # iOS example
 
+These files are not runnable Cargo examples. They are platform integration
+snippets, and their Rust bridge code is compile-checked by
+`tests/mobile_bridges.rs`.
+
 This example shows a sound public-API integration path for `tokio-tun` on
 iOS: keep packet capture in Swift with NetworkExtension, and move packets
 across an app-created `SOCK_DGRAM` socket pair to Rust.

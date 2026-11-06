@@ -4,8 +4,9 @@
 //! `ParcelFileDescriptor.detachFd()`. The descriptor is owned by the caller
 //! and transferred to Rust at the JNI boundary.
 //!
-//! This file is compiled as an example target. A real application should build
-//! it as a `cdylib` and enable Tokio's runtime feature, for example
+//! This file is an illustrative bridge snippet, not a Cargo example. It is
+//! compile-checked through `tests/mobile_bridges.rs`. A real application should
+//! build it as a `cdylib` and enable Tokio's runtime feature, for example
 //! `tokio = { version = "1.54", features = ["rt-multi-thread", "net"] }`.
 
 use std::ffi::{c_int, c_void};
@@ -93,5 +94,3 @@ pub extern "system" fn Java_com_example_tokiotun_TokioTunService_nativeStop(
         handle.abort();
     }
 }
-
-fn main() {}

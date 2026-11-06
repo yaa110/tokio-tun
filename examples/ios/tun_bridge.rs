@@ -4,8 +4,9 @@
 //! passes one end to [`tokio_tun_start`]. Rust wraps that end in `TunQueue`,
 //! reads/writes raw IP packets, and aborts the task on `tokio_tun_stop`.
 //!
-//! This file is an example, not a Cargo target. Build it as a `cdylib` and
-//! include a C header/bridging header for the two exported functions. The
+//! This file is an illustrative bridge snippet, not a Cargo example. It is
+//! compile-checked through `tests/mobile_bridges.rs`. Build it as a `cdylib`
+//! and include a C header/bridging header for the two exported functions. The
 //! application must enable Tokio's runtime feature (for example
 //! `tokio = { version = "1.54", features = ["rt-multi-thread", "net"] }`).
 
@@ -88,5 +89,3 @@ pub extern "C" fn tokio_tun_stop() {
         handle.abort();
     }
 }
-
-fn main() {}
