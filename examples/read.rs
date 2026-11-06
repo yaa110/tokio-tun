@@ -8,13 +8,10 @@ async fn main() {
     let tun = Arc::new(
         Tun::builder()
             .name("")
-            .tap()
-            .packet_info()
             .mtu(1350)
             .up()
             .address(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 24)
             .destination(IpAddr::V4(Ipv4Addr::new(10, 1, 0, 1)))
-            .broadcast(Ipv4Addr::new(10, 0, 0, 255))
             .build()
             .unwrap()
             .pop()
@@ -22,23 +19,22 @@ async fn main() {
     );
 
     println!("-----------");
-    println!("tap created");
+    println!("tun created");
     println!("-----------");
 
     println!(
-        "┌ name: {}\n├ fd: {}\n├ mtu: {}\n├ flags: {}\n├ address: {}\n├ destination: {}\n├ broadcast: {}\n└ netmask: {}",
+        "┌ name: {}\n├ fd: {}\n├ mtu: {}\n├ flags: {}\n├ address: {}\n├ destination: {}\n└ netmask: {}",
         tun.name(),
         tun.as_raw_fd(),
         tun.mtu().unwrap(),
         tun.flags().unwrap(),
         tun.address().unwrap(),
         tun.destination().unwrap(),
-        tun.broadcast().unwrap(),
         tun.netmask().unwrap(),
     );
 
     println!("---------------------");
-    println!("ping 10.1.0.2 to test");
+    println!("ping 10.1.0.1 to test");
     println!("---------------------");
 
     // Reader

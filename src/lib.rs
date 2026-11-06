@@ -1,3 +1,6 @@
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+compile_error!("tokio-tun supports Linux and macOS only");
+
 #[cfg(target_os = "linux")]
 mod linux {
     pub mod address;
@@ -6,6 +9,14 @@ mod linux {
     pub mod netlink;
     pub mod params;
     pub mod request;
+}
+
+#[cfg(target_os = "macos")]
+mod macos {
+    pub mod address;
+    pub mod interface;
+    pub mod io;
+    pub mod params;
 }
 
 mod address;

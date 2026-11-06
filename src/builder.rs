@@ -2,27 +2,39 @@ use crate::Result;
 use crate::address::AddressConfig;
 #[cfg(target_os = "linux")]
 use crate::linux::params::Params;
-#[cfg(target_os = "linux")]
+#[cfg(target_os = "macos")]
+use crate::macos::params::Params;
 use crate::tun::Tun;
+#[cfg(target_os = "linux")]
 use libc::{IFF_NO_PI, IFF_TAP, IFF_TUN};
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::IpAddr;
+#[cfg(target_os = "linux")]
+use std::net::Ipv4Addr;
 
 const MAX_INTERFACE_NAME_LEN: usize = 15;
+#[cfg(target_os = "linux")]
 const MAX_QUEUES: usize = 256;
 
 /// Represents a factory to build new instances of [`Tun`](struct.Tun.html).
 pub struct TunBuilder {
     name: String,
+    #[cfg(target_os = "linux")]
     is_tap: bool,
+    #[cfg(target_os = "linux")]
     packet_info: bool,
+    #[cfg(target_os = "linux")]
     persist: bool,
     up: bool,
     mtu: Option<i32>,
+    #[cfg(target_os = "linux")]
     owner: Option<i32>,
+    #[cfg(target_os = "linux")]
     group: Option<i32>,
+    #[cfg(target_os = "linux")]
     mac_address: Option<[u8; 6]>,
     addresses: Vec<AddressConfig>,
     invalid_reason: Option<&'static str>,
+    #[cfg(target_os = "linux")]
     queues: Option<usize>,
     cloexec: bool,
 }
@@ -31,16 +43,23 @@ impl Default for TunBuilder {
     fn default() -> Self {
         Self {
             name: "".into(),
+            #[cfg(target_os = "linux")]
             owner: None,
+            #[cfg(target_os = "linux")]
             group: None,
+            #[cfg(target_os = "linux")]
             is_tap: false,
+            #[cfg(target_os = "linux")]
             persist: false,
             up: false,
             mtu: None,
+            #[cfg(target_os = "linux")]
             packet_info: false,
+            #[cfg(target_os = "linux")]
             mac_address: None,
             addresses: Vec::new(),
             invalid_reason: None,
+            #[cfg(target_os = "linux")]
             queues: None,
             cloexec: true,
         }
@@ -57,6 +76,8 @@ impl TunBuilder {
     ///
     /// Names longer than 15 bytes or containing a NUL byte cause
     /// [`build`](TunBuilder::build) to return an error.
+    ///
+    /// On macOS, only an empty name, `utun`, and `utunN` are supported.
     pub fn name(mut self, name: &str) -> Self {
         self.name = name.into();
         self
@@ -69,6 +90,7 @@ impl TunBuilder {
     ///
     /// In contrast, *TUN* devices are layer 3 devices which means that IP packets are transmitted
     /// over it.
+    #[cfg(target_os = "linux")]
     pub fn tap(mut self) -> Self {
         self.is_tap = true;
         self
@@ -79,6 +101,7 @@ impl TunBuilder {
     /// Internally this creates multiple file descriptors to parallelize packet sending and receiving.
     /// The value must be between `1` and `256` inclusive; otherwise
     /// [`build`](TunBuilder::build) returns an error. Default value is `1`.
+    #[cfg(target_os = "linux")]
     pub fn queues(mut self, queues: usize) -> Self {
         self.queues = Some(queues);
         self
@@ -93,6 +116,7 @@ impl TunBuilder {
     ///
     /// If you don't need this kind of information, you do not need to set this option. In this
     /// case, only raw packets (whatever they may be) are received.
+    #[cfg(target_os = "linux")]
     pub fn packet_info(mut self) -> Self {
         self.packet_info = true;
         self
@@ -113,6 +137,7 @@ impl TunBuilder {
     /// Sets the owner of device.
     ///
     /// This is the numeric UID of the user who will own the created device.
+    #[cfg(target_os = "linux")]
     pub fn owner(mut self, owner: i32) -> Self {
         self.owner = Some(owner);
         self
@@ -121,6 +146,7 @@ impl TunBuilder {
     /// Sets the group of device.
     ///
     /// This is the numeric GID of the group that will own the created device.
+    #[cfg(target_os = "linux")]
     pub fn group(mut self, group: i32) -> Self {
         self.group = Some(group);
         self
@@ -132,6 +158,7 @@ impl TunBuilder {
     /// used together with [`tap`](TunBuilder::tap); otherwise
     /// [`build`](TunBuilder::build) returns an error. The address must be a
     /// non-zero unicast address.
+    #[cfg(target_os = "linux")]
     pub fn mac_address(mut self, mac: [u8; 6]) -> Self {
         self.mac_address = Some(mac);
         self
@@ -176,6 +203,8 @@ impl TunBuilder {
     /// [`address`](TunBuilder::address) before this method; otherwise
     /// [`build`](TunBuilder::build) returns an error.
     ///
+    /// On macOS, IPv6 destinations require a `/128` prefix.
+    ///
     /// ```no_run
     /// use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     /// use tokio_tun::Tun;
@@ -183,7 +212,7 @@ impl TunBuilder {
     /// let tun = Tun::builder()
     ///     .address(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 24)
     ///     .destination(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)))
-    ///     .address(IpAddr::V6(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1)), 64)
+    ///     .address(IpAddr::V6(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1)), 128)
     ///     .destination(IpAddr::V6(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2)))
     ///     .up()
     ///     .build()
@@ -210,6 +239,7 @@ impl TunBuilder {
     /// IPv6 has no broadcast address, so the most recently added address must
     /// be an IPv4 address. Call [`address`](TunBuilder::address) before this
     /// method; otherwise [`build`](TunBuilder::build) returns an error.
+    #[cfg(target_os = "linux")]
     pub fn broadcast(mut self, broadcast: Ipv4Addr) -> Self {
         if let Some(config) = self.addresses.last_mut() {
             if config.address.is_ipv4() {
@@ -247,6 +277,7 @@ impl TunBuilder {
     ///
     /// Non-persistent devices on the other hand, are removed as soon as the controlling process
     /// exits.
+    #[cfg(target_os = "linux")]
     pub fn persist(mut self) -> Self {
         self.persist = true;
         self
@@ -264,15 +295,24 @@ impl TunBuilder {
     /// Builds a new instance of [`Tun`](struct.Tun.html).
     ///
     /// This method must be called from within a Tokio runtime with I/O enabled.
+    ///
+    /// On macOS, invalid interface names and IPv6 destinations without a
+    /// `/128` prefix return an error.
     pub fn build(self) -> Result<Vec<Tun>> {
         self.validate()?;
-        match self.queues {
-            Some(queues) if queues > 1 => Tun::new_mq(self.into(), queues),
-            _ => Tun::new(self.into()).map(|tun| vec![tun]),
+        #[cfg(target_os = "linux")]
+        if let Some(queues) = self.queues
+            && queues > 1
+        {
+            return Tun::new_mq(self.into(), queues);
         }
+        Tun::new(self.into()).map(|tun| vec![tun])
     }
 
     fn validate(&self) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        self.validate_macos()?;
+
         if let Some(reason) = self.invalid_reason {
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, reason).into());
         }
@@ -292,23 +332,27 @@ impl TunBuilder {
                 .into());
             }
         }
-        if matches!(self.queues, Some(queues) if queues == 0 || queues > MAX_QUEUES) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "queues must be between 1 and 256",
-            )
-            .into());
-        }
-        if let Some(mac) = self.mac_address {
-            if !self.is_tap {
+        #[cfg(target_os = "linux")]
+        {
+            if matches!(self.queues, Some(queues) if queues == 0 || queues > MAX_QUEUES) {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
-                    "MAC address is only supported for TAP devices",
+                    "queues must be between 1 and 256",
                 )
                 .into());
             }
-            crate::address::validate_mac(mac)
-                .map_err(|reason| std::io::Error::new(std::io::ErrorKind::InvalidInput, reason))?;
+            if let Some(mac) = self.mac_address {
+                if !self.is_tap {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "MAC address is only supported for TAP devices",
+                    )
+                    .into());
+                }
+                crate::address::validate_mac(mac).map_err(|reason| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, reason)
+                })?;
+            }
         }
         for address in &self.addresses {
             address
@@ -317,8 +361,41 @@ impl TunBuilder {
         }
         Ok(())
     }
+
+    #[cfg(target_os = "macos")]
+    fn validate_macos(&self) -> Result<()> {
+        if self
+            .addresses
+            .iter()
+            .any(|address| address.broadcast.is_some())
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "broadcast addresses are not supported on macOS utun devices",
+            )
+            .into());
+        }
+        if self.addresses.iter().any(|address| {
+            address.address.is_ipv6() && address.destination.is_some() && address.prefix_len != 128
+        }) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "macOS utun requires IPv6 destinations to use a /128 prefix",
+            )
+            .into());
+        }
+        if !self.name.is_empty() && crate::macos::params::parse_utun_name(&self.name).is_none() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "interface names on macOS must be empty, \"utun\", or \"utun<N>\"",
+            )
+            .into());
+        }
+        Ok(())
+    }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 impl From<TunBuilder> for Params {
     #[cfg(target_os = "linux")]
     fn from(builder: TunBuilder) -> Self {
@@ -346,9 +423,19 @@ impl From<TunBuilder> for Params {
         }
     }
 
-    #[cfg(not(any(target_os = "linux")))]
+    #[cfg(target_os = "macos")]
     fn from(builder: TunBuilder) -> Self {
-        unimplemented!()
+        Params {
+            name: if builder.name.is_empty() {
+                None
+            } else {
+                Some(builder.name)
+            },
+            up: builder.up,
+            mtu: builder.mtu,
+            addresses: builder.addresses,
+            cloexec: builder.cloexec,
+        }
     }
 }
 
@@ -399,6 +486,7 @@ mod tests {
         assert_eq!(builder.addresses[1].destination, Some(v6("fd00::2")));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn broadcast_attaches_to_most_recent_ipv4_address() {
         let builder = TunBuilder::new()
@@ -436,6 +524,7 @@ mod tests {
         assert_invalid_input(TunBuilder::new().destination(v4(10, 0, 0, 2)).build());
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn build_rejects_broadcast_for_ipv6() {
         assert_invalid_input(
@@ -471,18 +560,21 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn build_rejects_invalid_names() {
         assert_invalid_input(TunBuilder::new().name("abcdefghijklmnop").build());
         assert_invalid_input(TunBuilder::new().name("tun0\0evil").build());
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn build_rejects_invalid_queue_counts() {
         assert_invalid_input(TunBuilder::new().queues(0).build());
         assert_invalid_input(TunBuilder::new().queues(257).build());
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn build_rejects_mac_address_for_tun() {
         assert_invalid_input(
@@ -492,6 +584,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn build_rejects_invalid_mac_addresses() {
         assert_invalid_input(
@@ -508,6 +601,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn validate_accepts_mac_address_for_tap() {
         assert!(
@@ -519,6 +613,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn mac_address_can_be_set_before_tap() {
         assert!(
@@ -541,6 +636,46 @@ mod tests {
         assert!(
             TunBuilder::new()
                 .address(v6("fd00::1"), 128)
+                .validate()
+                .is_ok()
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_accepts_utun_names() {
+        assert!(TunBuilder::new().name("").validate().is_ok());
+        assert!(TunBuilder::new().name("utun").validate().is_ok());
+        assert!(TunBuilder::new().name("utun0").validate().is_ok());
+        assert!(TunBuilder::new().name("utun12").validate().is_ok());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_rejects_invalid_utun_names() {
+        assert_invalid_input(TunBuilder::new().name("tun0").build());
+        assert_invalid_input(TunBuilder::new().name("utun+1").build());
+        assert_invalid_input(TunBuilder::new().name("utun01").build());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_rejects_ipv6_destination_below_128() {
+        assert_invalid_input(
+            TunBuilder::new()
+                .address(v6("fd00::1"), 64)
+                .destination(v6("fd00::2"))
+                .build(),
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_accepts_ipv6_destination_at_128() {
+        assert!(
+            TunBuilder::new()
+                .address(v6("fd00::1"), 128)
+                .destination(v6("fd00::2"))
                 .validate()
                 .is_ok()
         );
