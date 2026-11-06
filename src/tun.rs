@@ -214,6 +214,7 @@ impl Tun {
             params.name.as_deref().unwrap_or_default(),
             params.flags,
             multi_queue,
+            params.offload,
             params.cloexec,
         )?;
         iface.init(params)?;
@@ -252,6 +253,11 @@ impl Tun {
     /// Receives a packet from the Tun/Tap interface.
     ///
     /// This method takes &self, so it is possible to call this method concurrently with other methods on this struct.
+    ///
+    /// When Linux offload is enabled, the returned bytes include the
+    /// `VirtioNetHeader` prefix. Use `vnet_hdr_len` to locate the payload
+    /// (IP packet for TUN, Ethernet frame for TAP). With offload enabled, size
+    /// receive buffers for `vnet_hdr_len + 65_536` bytes.
     pub async fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
         self.io.recv(buf).await
     }
@@ -259,6 +265,9 @@ impl Tun {
     /// Sends a buffer to the Tun/Tap interface. Returns the number of bytes written to the device.
     ///
     /// This method takes &self, so it is possible to call this method concurrently with other methods on this struct.
+    ///
+    /// When Linux offload is enabled, `buf` must start with the
+    /// `VirtioNetHeader` prefix.
     pub async fn send(&self, buf: &[u8]) -> io::Result<usize> {
         self.io.send(buf).await
     }
@@ -327,6 +336,13 @@ impl Tun {
     /// Returns the interface index of the Tun/Tap device.
     pub fn index(&self) -> Result<u32> {
         self.iface.index()
+    }
+
+    /// Returns the Linux virtio-net header length, or `0` when offload is
+    /// disabled.
+    #[cfg(target_os = "linux")]
+    pub fn vnet_hdr_len(&self) -> usize {
+        self.iface.vnet_hdr_len()
     }
 
     /// Returns the value of MTU.
@@ -475,7 +491,7 @@ mod tests {
         let io = TunQueue::new(writer).unwrap();
         // No TUN device is configured by this fixture. The empty interface is
         // only metadata; I/O uses a non-fsyncable socket pair.
-        let iface = Arc::new(Interface::new(Vec::new(), "", 0, false, false).unwrap());
+        let iface = Arc::new(Interface::new(Vec::new(), "", 0, false, false, false).unwrap());
         (Tun { iface, io }, reader)
     }
 

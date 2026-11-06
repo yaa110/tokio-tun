@@ -25,6 +25,8 @@ pub struct TunBuilder {
     #[cfg(target_os = "linux")]
     packet_info: bool,
     #[cfg(target_os = "linux")]
+    offload: bool,
+    #[cfg(target_os = "linux")]
     persist: bool,
     up: bool,
     mtu: Option<i32>,
@@ -57,6 +59,8 @@ impl Default for TunBuilder {
             mtu: None,
             #[cfg(target_os = "linux")]
             packet_info: false,
+            #[cfg(target_os = "linux")]
+            offload: false,
             #[cfg(target_os = "linux")]
             mac_address: None,
             addresses: Vec::new(),
@@ -140,6 +144,33 @@ impl TunBuilder {
     /// may vary to account for some protocol overhead.
     pub fn mtu(mut self, mtu: i32) -> Self {
         self.mtu = Some(mtu);
+        self
+    }
+
+    /// Enables Linux TUN/TAP offloads (TSO/GSO/GRO) using the virtio net
+    /// header.
+    ///
+    /// This sets `IFF_VNET_HDR`, `IFF_NAPI`, configures checksum and TCP
+    /// segmentation offloads, and sets the virtio header size to
+    /// [`VIRTIO_NET_HDR_LEN`](crate::VIRTIO_NET_HDR_LEN). NAPI enables GRO for
+    /// packets written from userspace into the kernel; it does not coalesce
+    /// packets delivered to userspace.
+    ///
+    /// Every packet read from the device then starts with a
+    /// [`VirtioNetHeader`](crate::VirtioNetHeader), and every packet written to
+    /// it must include that header. The header carries GSO and checksum
+    /// metadata in both directions. Callers are responsible for preserving and
+    /// interpreting that metadata. Size receive buffers for at least
+    /// `VIRTIO_NET_HDR_LEN + 65_536` bytes because GSO packets can exceed the
+    /// interface MTU.
+    ///
+    /// When attaching another queue to an existing multi-queue device, call
+    /// `offload()` on that attach too. An offload-state mismatch is rejected.
+    ///
+    /// This is mutually exclusive with `packet_info`.
+    #[cfg(target_os = "linux")]
+    pub fn offload(mut self) -> Self {
+        self.offload = true;
         self
     }
 
@@ -345,6 +376,13 @@ impl TunBuilder {
         }
         #[cfg(target_os = "linux")]
         {
+            if self.offload && self.packet_info {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "offload and packet_info cannot be enabled together",
+                )
+                .into());
+            }
             if matches!(self.queues, Some(queues) if queues == 0 || queues > MAX_QUEUES) {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
@@ -467,6 +505,7 @@ impl From<TunBuilder> for Params {
                 }
                 flags
             },
+            offload: builder.offload,
             persist: builder.persist,
             up: builder.up,
             mtu: builder.mtu,

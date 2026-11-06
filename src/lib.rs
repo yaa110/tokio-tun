@@ -47,6 +47,8 @@ mod raw_io;
 mod address;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
 mod builder;
+#[cfg(target_os = "linux")]
+mod offload;
 #[cfg(any(
     target_os = "linux",
     target_os = "macos",
@@ -63,6 +65,13 @@ mod tun;
 pub use self::address::AddressInfo;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
 pub use self::builder::TunBuilder;
+#[cfg(target_os = "linux")]
+pub use self::offload::{
+    VIRTIO_NET_HDR_F_DATA_VALID, VIRTIO_NET_HDR_F_NEEDS_CSUM, VIRTIO_NET_HDR_F_RSC_INFO,
+    VIRTIO_NET_HDR_GSO_ECN, VIRTIO_NET_HDR_GSO_NONE, VIRTIO_NET_HDR_GSO_TCPV4,
+    VIRTIO_NET_HDR_GSO_TCPV6, VIRTIO_NET_HDR_GSO_UDP, VIRTIO_NET_HDR_GSO_UDP_L4,
+    VIRTIO_NET_HDR_LEN, VirtioNetHeader,
+};
 #[cfg(any(
     target_os = "linux",
     target_os = "macos",

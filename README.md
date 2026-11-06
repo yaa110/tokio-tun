@@ -121,17 +121,56 @@ headers automatically; TAP descriptors carry raw Ethernet frames.
 
 `queues(1)` opens the device with `IFF_MULTI_QUEUE`, so additional queues can
 be attached later using the same interface name. Do not repeat address
-configuration when attaching an additional queue.
+configuration when attaching an additional queue. If the device was created
+with `.offload()`, every attached queue must also call `.offload()`; an offload
+state mismatch is rejected.
+
+### Linux offload (TSO/GSO/GRO)
+
+On Linux, `TunBuilder::offload()` enables the kernel TUN offloads and the
+virtio-net header:
+
+```rust
+use tokio_tun::{Tun, VirtioNetHeader, VIRTIO_NET_HDR_LEN};
+
+#[tokio::main]
+async fn main() {
+    let tun = Tun::builder()
+        .offload()
+        .address("10.0.0.1".parse().unwrap(), 24)
+        .destination("10.0.0.2".parse().unwrap())
+        .up()
+        .build()
+        .unwrap()
+        .pop()
+        .unwrap();
+
+    let mut packet = vec![0u8; VIRTIO_NET_HDR_LEN + 65_536];
+    let n = tun.recv(&mut packet).await.unwrap();
+    let header = VirtioNetHeader::decode(&packet[..VIRTIO_NET_HDR_LEN]).unwrap();
+    let ip_packet = &packet[VIRTIO_NET_HDR_LEN..n];
+}
+```
+
+Every received packet starts with a ten-byte `virtio_net_hdr`; every packet
+sent to the device must include it. `offload()` configures checksum, TSO4, TSO6,
+and NAPI-based GRO, and is mutually exclusive with `packet_info()`. The header
+carries GSO/checksum metadata in both directions; NAPI GRO applies to packets
+written from userspace into the kernel and does not coalesce packets delivered
+to userspace. Applications remain responsible for segmentation/coalescing
+semantics. With offload enabled, use a receive buffer of at least
+`VIRTIO_NET_HDR_LEN + 65_536` bytes because GSO packets can exceed the
+interface MTU.
 
 ## Supported Platforms
 
-| Platform | TUN | TAP | Multi-Queue | Notes |
-|---|:---:|:---:|:---:|---|
-| Linux | ✅ | ✅ | ✅ | Full API |
-| macOS | ✅ | ❌ | ❌ | `utun`; TUN only |
-| Android | ✅ | ❌ | ❌ | `TunQueue` only; `VpnService` fd |
-| iOS | ✅ | ❌ | ❌ | `TunQueue` only; NetworkExtension bridge |
-| FreeBSD | ✅ | ✅ | ❌ | `/dev/tun` and `/dev/tap`; TUN uses BSD address-family headers internally |
+| Platform | TUN | TAP | Multi-Queue | Offload | Notes |
+|---|:---:|:---:|:---:|:---:|---|
+| Linux | ✅ | ✅ | ✅ | ✅ | Full API; virtio-net TSO/GSO, NAPI GRO on writes |
+| macOS | ✅ | ❌ | ❌ | ❌ | `utun`; TUN only |
+| Android | ✅ | ❌ | ❌ | ❌ | `TunQueue` only; `VpnService` fd |
+| iOS | ✅ | ❌ | ❌ | ❌ | `TunQueue` only; NetworkExtension bridge |
+| FreeBSD | ✅ | ✅ | ❌ | ❌ | `/dev/tun` and `/dev/tap`; TUN uses BSD address-family headers internally |
 
 Mobile support is I/O-only: it wraps an externally supplied packet descriptor
 and does not allocate devices or integrate with `VpnService` /

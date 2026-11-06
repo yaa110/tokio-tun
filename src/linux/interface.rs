@@ -1,6 +1,7 @@
 use super::params::Params;
 use super::request::ifreq;
 use crate::Result;
+use crate::VIRTIO_NET_HDR_LEN;
 use crate::address::{AddressInfo, ipv4_broadcast};
 use crate::linux::address::ipv4_from_sockaddr;
 use crate::linux::netlink;
@@ -11,6 +12,31 @@ use std::net::Ipv4Addr;
 
 const MAX_INTERFACE_NAME_LEN: usize = 15;
 
+fn ioctl_int_ptr(fd: i32, request: libc::Ioctl, value: *const libc::c_int) -> Result<()> {
+    // SAFETY: the caller supplies a valid request that takes a pointer argument.
+    let result = unsafe { libc::ioctl(fd, request, value) };
+    if result < 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    Ok(())
+}
+
+fn set_offload(fd: i32, enable: bool) -> Result<()> {
+    if enable {
+        let hdr_size = VIRTIO_NET_HDR_LEN as libc::c_int;
+        ioctl_int_ptr(fd, libc::TUNSETVNETHDRSZ, &hdr_size)?;
+        let offloads = libc::TUN_F_CSUM | libc::TUN_F_TSO4 | libc::TUN_F_TSO6;
+        // TUNSETOFFLOAD takes the offload mask as the ioctl argument, not as a
+        // pointer (despite its `_IOW` encoding).
+        ioctl_int(fd, libc::TUNSETOFFLOAD, offloads as libc::c_ulong)
+    } else {
+        // A persistent device can retain its offload features after all queues
+        // close. Clear them when the caller does not request offload so the
+        // device state always matches `vnet_hdr_len`.
+        ioctl_int(fd, libc::TUNSETOFFLOAD, 0)
+    }
+}
+
 fn ioctl_read(fd: i32, request: libc::Ioctl, req: *mut ifreq) -> Result<()> {
     // SAFETY: The caller guarantees that `req` points to a valid `ifreq` for
     // the duration of the call and that `request` accepts a pointer argument.
@@ -19,6 +45,15 @@ fn ioctl_read(fd: i32, request: libc::Ioctl, req: *mut ifreq) -> Result<()> {
         return Err(io::Error::last_os_error().into());
     }
     Ok(())
+}
+
+pub(crate) fn tun_flags(fd: i32) -> io::Result<i16> {
+    let mut req = ifreq::new("");
+    let result = unsafe { libc::ioctl(fd, libc::TUNGETIFF, &mut req) };
+    if result < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe { req.ifr_ifru.ifru_flags })
 }
 
 fn ioctl_write(fd: i32, request: libc::Ioctl, req: *const ifreq) -> Result<()> {
@@ -46,6 +81,7 @@ pub struct Interface {
     index: u32,
     name: String,
     is_tap: bool,
+    vnet_hdr_len: usize,
 }
 
 impl Interface {
@@ -54,6 +90,7 @@ impl Interface {
         name: &str,
         mut flags: i16,
         multi_queue: bool,
+        offload: bool,
         cloexec: bool,
     ) -> Result<Self> {
         if name.len() > MAX_INTERFACE_NAME_LEN || name.contains('\0') {
@@ -69,11 +106,44 @@ impl Interface {
         if multi_queue {
             flags |= libc::IFF_MULTI_QUEUE as i16;
         }
+        if offload {
+            flags |= libc::IFF_VNET_HDR as i16;
+            // NAPI enables GRO on the userspace-to-kernel write path.
+            flags |= libc::IFF_NAPI as i16;
+        }
         req.ifr_ifru.ifru_flags = flags;
         for &fd in &fds {
             if let Err(err) = ioctl_read(fd, libc::TUNSETIFF, &mut req) {
                 close_fds(&fds);
                 return Err(err);
+            }
+        }
+        let actual_vnet_hdr = if fds.is_empty() {
+            false
+        } else {
+            let actual_flags = match tun_flags(fds[0]) {
+                Ok(flags) => flags,
+                Err(err) => {
+                    close_fds(&fds);
+                    return Err(err.into());
+                }
+            };
+            (actual_flags & libc::IFF_VNET_HDR as i16) != 0
+        };
+        if actual_vnet_hdr != offload && !fds.is_empty() {
+            close_fds(&fds);
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "offload must match the existing TUN/TAP device state",
+            )
+            .into());
+        }
+        if !fds.is_empty() {
+            for &fd in &fds {
+                if let Err(err) = set_offload(fd, offload) {
+                    close_fds(&fds);
+                    return Err(err);
+                }
             }
         }
 
@@ -113,6 +183,11 @@ impl Interface {
             index,
             name,
             is_tap,
+            vnet_hdr_len: if actual_vnet_hdr {
+                VIRTIO_NET_HDR_LEN
+            } else {
+                0
+            },
         })
     }
 
@@ -180,6 +255,10 @@ impl Interface {
 
     pub fn name(&self) -> &str {
         self.name.as_str()
+    }
+
+    pub fn vnet_hdr_len(&self) -> usize {
+        self.vnet_hdr_len
     }
 
     /// Returns the interface index of the device.
@@ -335,13 +414,13 @@ mod tests {
 
     #[test]
     fn index_resolves_loopback() {
-        let interface = Interface::new(Vec::new(), "lo", 0, false, false).unwrap();
+        let interface = Interface::new(Vec::new(), "lo", 0, false, false, false).unwrap();
         assert!(interface.index().unwrap() > 0);
     }
 
     #[test]
     fn addresses_reads_loopback() {
-        let interface = Interface::new(Vec::new(), "lo", 0, false, false).unwrap();
+        let interface = Interface::new(Vec::new(), "lo", 0, false, false, false).unwrap();
         let addresses = interface.addresses().unwrap();
         assert!(addresses.iter().any(|info| info.address.is_ipv4()));
         // IPv6 can be disabled in some environments.
@@ -356,7 +435,7 @@ mod tests {
 
     #[test]
     fn rejects_invalid_interface_names() {
-        assert!(Interface::new(Vec::new(), "abcdefghijklmnop", 0, false, false).is_err());
-        assert!(Interface::new(Vec::new(), "tun0\0evil", 0, false, false).is_err());
+        assert!(Interface::new(Vec::new(), "abcdefghijklmnop", 0, false, false, false).is_err());
+        assert!(Interface::new(Vec::new(), "tun0\0evil", 0, false, false, false).is_err());
     }
 }

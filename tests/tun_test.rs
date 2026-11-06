@@ -471,3 +471,205 @@ async fn test_invalid_config_error() {
     let err_str = err.to_string();
     assert!(!err_str.is_empty());
 }
+
+#[tokio::test]
+async fn test_offload_virtio_header() {
+    let tun = skip_without_cap_net_admin!(
+        Tun::builder()
+            .name("tunoff0")
+            .offload()
+            .address(IpAddr::V4(Ipv4Addr::new(10, 70, 0, 1)), 24)
+            .destination(IpAddr::V4(Ipv4Addr::new(10, 70, 0, 2)))
+            .up()
+            .build()
+    )
+    .pop()
+    .unwrap();
+    assert_eq!(tun.vnet_hdr_len(), tokio_tun::VIRTIO_NET_HDR_LEN);
+
+    let queue: tokio_tun::TunQueue = tun.into();
+    assert_eq!(queue.vnet_hdr_len().unwrap(), tokio_tun::VIRTIO_NET_HDR_LEN);
+
+    let socket = UdpSocket::bind("10.70.0.1:0").await.unwrap();
+    socket
+        .send_to(b"offload packet", "10.70.0.2:7777")
+        .await
+        .unwrap();
+
+    let mut packet = vec![0u8; 65_535];
+    let (n, payload_start) = loop {
+        let n = tokio::time::timeout(std::time::Duration::from_secs(3), queue.recv(&mut packet))
+            .await
+            .expect("offload packet timed out")
+            .unwrap();
+        let payload = &packet[tokio_tun::VIRTIO_NET_HDR_LEN..n];
+        if payload
+            .windows(b"offload packet".len())
+            .any(|w| w == b"offload packet")
+        {
+            break (n, tokio_tun::VIRTIO_NET_HDR_LEN);
+        }
+    };
+
+    assert!(n > payload_start);
+    let header = tokio_tun::VirtioNetHeader::decode(&packet[..payload_start]).unwrap();
+    let payload = &packet[payload_start..n];
+    assert!(matches!(payload[0] >> 4, 4 | 6));
+
+    // The virtio header is part of the packet buffer in both directions.
+    let mut framed = Vec::with_capacity(tokio_tun::VIRTIO_NET_HDR_LEN + payload.len());
+    framed.resize(tokio_tun::VIRTIO_NET_HDR_LEN, 0);
+    header.encode(&mut framed).unwrap();
+    framed.extend_from_slice(payload);
+    queue.send(&framed).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_offload_rejects_packet_info() {
+    let result = Tun::builder().offload().packet_info().build();
+    assert!(matches!(
+        result,
+        Err(tokio_tun::Error::IoError(ref err))
+            if err.kind() == std::io::ErrorKind::InvalidInput
+    ));
+}
+
+#[tokio::test]
+async fn test_plain_tun_queue_has_no_vnet_header() {
+    let tun = skip_without_cap_net_admin!(Tun::builder().name("tunplain0").up().build())
+        .pop()
+        .unwrap();
+    let queue: tokio_tun::TunQueue = tun.into();
+    assert_eq!(queue.vnet_hdr_len().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn test_multi_queue_offload_must_match() {
+    let tuns = skip_without_cap_net_admin!(
+        Tun::builder()
+            .name("tunoffmq0")
+            .queues(1)
+            .offload()
+            .up()
+            .build()
+    );
+    assert_eq!(tuns.len(), 1);
+
+    let err = match Tun::builder().name("tunoffmq0").queues(1).build() {
+        Ok(_) => panic!("attaching without .offload() unexpectedly succeeded"),
+        Err(err) => err,
+    };
+    let tokio_tun::Error::IoError(err) = err;
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    drop(tuns);
+}
+
+#[tokio::test]
+async fn test_multi_queue_without_offload_rejects_offload_attach() {
+    let tuns =
+        skip_without_cap_net_admin!(Tun::builder().name("tunplainmq0").queues(1).up().build());
+    assert_eq!(tuns.len(), 1);
+
+    let err = match Tun::builder()
+        .name("tunplainmq0")
+        .queues(1)
+        .offload()
+        .build()
+    {
+        Ok(_) => panic!("attaching with .offload() unexpectedly succeeded"),
+        Err(err) => err,
+    };
+    let tokio_tun::Error::IoError(err) = err;
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    drop(tuns);
+}
+
+#[tokio::test]
+async fn test_persistent_offload_reattach_without_offload_clears_features() {
+    let tun = skip_without_cap_net_admin!(
+        Tun::builder()
+            .name("tunpersistoff0")
+            .persist()
+            .offload()
+            .address(IpAddr::V4(Ipv4Addr::new(10, 71, 0, 1)), 24)
+            .destination(IpAddr::V4(Ipv4Addr::new(10, 71, 0, 2)))
+            .up()
+            .build()
+    )
+    .pop()
+    .unwrap();
+    assert_eq!(tun.vnet_hdr_len(), tokio_tun::VIRTIO_NET_HDR_LEN);
+    drop(tun);
+
+    // The persistent interface retains its address configuration and up state.
+    let plain = skip_without_cap_net_admin!(Tun::builder().name("tunpersistoff0").build())
+        .pop()
+        .unwrap();
+    assert_eq!(plain.vnet_hdr_len(), 0);
+
+    let queue: tokio_tun::TunQueue = plain.into();
+    let socket = UdpSocket::bind("10.71.0.1:0").await.unwrap();
+    socket
+        .send_to(b"persistent offload packet", "10.71.0.2:7777")
+        .await
+        .unwrap();
+
+    let mut packet = vec![0u8; 65_535];
+    let n = loop {
+        let n = tokio::time::timeout(std::time::Duration::from_secs(3), queue.recv(&mut packet))
+            .await
+            .expect("persistent offload packet timed out")
+            .unwrap();
+        if packet[..n]
+            .windows(b"persistent offload packet".len())
+            .any(|w| w == b"persistent offload packet")
+        {
+            break n;
+        }
+    };
+    let packet = &packet[..n];
+
+    assert_eq!(packet[0] >> 4, 4);
+    let ip_header_len = usize::from(packet[0] & 0x0f) * 4;
+    assert!(packet.len() >= ip_header_len + 8);
+    assert_eq!(packet[9], 17, "expected UDP");
+    assert_eq!(checksum(&packet[..ip_header_len]), 0);
+    let udp = &packet[ip_header_len..];
+    let udp_len = usize::from(u16::from_be_bytes([udp[4], udp[5]]));
+    assert!(udp_len >= 8 && udp_len <= udp.len());
+    assert_ne!([udp[6], udp[7]], [0, 0], "UDP checksum was not computed");
+    assert_eq!(udp_checksum(packet, ip_header_len, udp_len), 0);
+
+    // Remove the persistent device so repeated test runs start cleanly.
+    unsafe {
+        libc::ioctl(queue.as_raw_fd(), libc::TUNSETPERSIST, 0);
+    }
+    drop(queue);
+    assert_eq!(interface_index("tunpersistoff0"), 0);
+}
+
+fn checksum(data: &[u8]) -> u16 {
+    let mut sum = 0u32;
+    for chunk in data.chunks(2) {
+        let word = if chunk.len() == 2 {
+            u16::from_be_bytes([chunk[0], chunk[1]])
+        } else {
+            u16::from_be_bytes([chunk[0], 0])
+        };
+        sum += u32::from(word);
+    }
+    while sum >> 16 != 0 {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    !(sum as u16)
+}
+
+fn udp_checksum(packet: &[u8], ip_header_len: usize, udp_len: usize) -> u16 {
+    let mut pseudo = Vec::with_capacity(12 + udp_len);
+    pseudo.extend_from_slice(&packet[12..20]);
+    pseudo.push(0);
+    pseudo.push(packet[9]);
+    pseudo.extend_from_slice(&(udp_len as u16).to_be_bytes());
+    pseudo.extend_from_slice(&packet[ip_header_len..ip_header_len + udp_len]);
+    checksum(&pseudo)
+}

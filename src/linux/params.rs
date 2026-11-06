@@ -5,6 +5,7 @@ use crate::address::AddressConfig;
 pub struct Params {
     pub name: Option<String>,
     pub flags: i16,
+    pub offload: bool,
     pub persist: bool,
     pub up: bool,
     pub mtu: Option<i32>,

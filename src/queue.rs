@@ -35,8 +35,9 @@ macro_rules! ready {
 /// For packet-oriented descriptors, use [`recv`](TunQueue::recv),
 /// [`send`](TunQueue::send), or [`sendv`](TunQueue::sendv) to preserve packet
 /// boundaries. Receive buffers should be at least as large as the interface
-/// MTU; `recv` may silently truncate a larger packet on Linux, Android, iOS,
-/// and FreeBSD.
+/// MTU. When Linux offload is active, `recv` returns the virtio-net header plus
+/// the payload, so use at least `VIRTIO_NET_HDR_LEN + 65_536` bytes. `recv` may
+/// silently truncate a larger packet on Linux, Android, iOS, and FreeBSD.
 ///
 /// ```no_run
 /// use std::os::fd::OwnedFd;
@@ -109,6 +110,9 @@ impl TunQueue {
     }
 
     /// Receives a packet from the queue.
+    ///
+    /// When Linux offload is enabled, the returned bytes include the virtio-net
+    /// header prefix.
     pub async fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
         loop {
             let mut guard = self.0.readable().await?;
@@ -120,6 +124,9 @@ impl TunQueue {
     }
 
     /// Sends a packet to the queue.
+    ///
+    /// When Linux offload is enabled, `buf` must include the virtio-net header
+    /// prefix.
     pub async fn send(&self, buf: &[u8]) -> io::Result<usize> {
         loop {
             let mut guard = self.0.writable().await?;
@@ -189,6 +196,31 @@ impl TunQueue {
     /// Tries to send vectored buffers without waiting.
     pub fn try_sendv(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
         self.0.get_ref().sendv(bufs)
+    }
+
+    /// Returns the Linux virtio-net header length configured on the descriptor.
+    ///
+    /// Returns `0` when `IFF_VNET_HDR` is not enabled.
+    #[cfg(target_os = "linux")]
+    pub fn vnet_hdr_len(&self) -> io::Result<usize> {
+        let flags = crate::linux::interface::tun_flags(self.as_raw_fd())?;
+        if flags & libc::IFF_VNET_HDR as i16 == 0 {
+            return Ok(0);
+        }
+        let mut len: libc::c_int = 0;
+        // SAFETY: `self` owns an open descriptor and TUNGETVNETHDRSZ expects an
+        // int pointer.
+        let result = unsafe {
+            libc::ioctl(
+                self.as_raw_fd(),
+                libc::TUNGETVNETHDRSZ,
+                &mut len as *mut libc::c_int,
+            )
+        };
+        if result < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(len as usize)
     }
 }
 
