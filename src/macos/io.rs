@@ -67,13 +67,19 @@ impl TunIo {
         message.msg_iov = iov.as_mut_ptr();
         message.msg_iovlen = iov.len() as _;
 
-        // SAFETY: `self.0` is a valid open descriptor, `message` points to
-        // live iovecs, and the kernel writes at most their combined length.
-        let received = unsafe { libc::recvmsg(self.0, &mut message, 0) };
-        if received < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let received = received as usize;
+        let received = loop {
+            // SAFETY: `self.0` is a valid open descriptor, `message` points to
+            // live iovecs, and the kernel writes at most their combined length.
+            let received = unsafe { libc::recvmsg(self.0, &mut message, 0) };
+            if received < 0 {
+                let err = io::Error::last_os_error();
+                if err.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(err);
+            }
+            break received as usize;
+        };
         if received < HEADER_LEN {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -121,13 +127,19 @@ impl TunIo {
         message.msg_iov = iov.as_ptr() as *mut _;
         message.msg_iovlen = iov.len() as _;
 
-        // SAFETY: `self.0` is a valid open descriptor and `message` points to
-        // live iovecs for the duration of the call.
-        let sent = unsafe { libc::sendmsg(self.0, &message, 0) };
-        if sent < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let sent = sent as usize;
+        let sent = loop {
+            // SAFETY: `self.0` is a valid open descriptor and `message` points
+            // to live iovecs for the duration of the call.
+            let sent = unsafe { libc::sendmsg(self.0, &message, 0) };
+            if sent < 0 {
+                let err = io::Error::last_os_error();
+                if err.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(err);
+            }
+            break sent as usize;
+        };
         if sent != HEADER_LEN + buf.len() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -158,13 +170,19 @@ impl TunIo {
         message.msg_iov = iov.as_mut_ptr();
         message.msg_iovlen = iov.len() as _;
 
-        // SAFETY: `self.0` is a valid open descriptor and `message` points to
-        // live iovecs for the duration of the call.
-        let sent = unsafe { libc::sendmsg(self.0, &message, 0) };
-        if sent < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let sent = sent as usize;
+        let sent = loop {
+            // SAFETY: `self.0` is a valid open descriptor and `message` points
+            // to live iovecs for the duration of the call.
+            let sent = unsafe { libc::sendmsg(self.0, &message, 0) };
+            if sent < 0 {
+                let err = io::Error::last_os_error();
+                if err.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(err);
+            }
+            break sent as usize;
+        };
         if sent != HEADER_LEN + payload_len {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,

@@ -5,6 +5,7 @@ pub struct TunIo(RawFd);
 
 impl FromRawFd for TunIo {
     unsafe fn from_raw_fd(fd: RawFd) -> Self {
+        // SAFETY: the caller transfers ownership of `fd` to the returned value.
         Self(fd)
     }
 }
@@ -46,19 +47,35 @@ impl Write for TunIo {
 
 impl TunIo {
     pub fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
-        let n = unsafe { libc::read(self.0, buf.as_ptr() as *mut _, buf.len() as _) };
-        if n < 0 {
-            return Err(io::Error::last_os_error());
+        loop {
+            // SAFETY: `self.0` is an open descriptor owned by this value, and
+            // `buf` is valid for writes of `buf.len()` bytes.
+            let n = unsafe { libc::read(self.0, buf.as_mut_ptr().cast(), buf.len() as _) };
+            if n < 0 {
+                let err = io::Error::last_os_error();
+                if err.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(err);
+            }
+            return Ok(n as _);
         }
-        Ok(n as _)
     }
 
     pub fn send(&self, buf: &[u8]) -> io::Result<usize> {
-        let n = unsafe { libc::write(self.0, buf.as_ptr() as *const _, buf.len() as _) };
-        if n < 0 {
-            return Err(io::Error::last_os_error());
+        loop {
+            // SAFETY: `self.0` is an open descriptor owned by this value, and
+            // `buf` is valid for reads of `buf.len()` bytes.
+            let n = unsafe { libc::write(self.0, buf.as_ptr().cast(), buf.len() as _) };
+            if n < 0 {
+                let err = io::Error::last_os_error();
+                if err.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(err);
+            }
+            return Ok(n as _);
         }
-        Ok(n as _)
     }
 
     pub fn sendv(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
@@ -69,16 +86,25 @@ impl TunIo {
                 iov_len: buf.len() as _,
             })
             .collect::<Vec<_>>();
-        let n = unsafe { libc::writev(self.0, iov.as_ptr() as *const _, iov.len() as _) };
-        if n < 0 {
-            return Err(io::Error::last_os_error());
+        loop {
+            // SAFETY: `self.0` is an open descriptor owned by this value, and
+            // `iov` contains valid base/length pairs for the duration of the call.
+            let n = unsafe { libc::writev(self.0, iov.as_ptr(), iov.len() as _) };
+            if n < 0 {
+                let err = io::Error::last_os_error();
+                if err.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(err);
+            }
+            return Ok(n as _);
         }
-        Ok(n as _)
     }
 }
 
 impl Drop for TunIo {
     fn drop(&mut self) {
+        // SAFETY: `TunIo` owns `self.0` and closes it exactly once.
         unsafe { libc::close(self.0) };
     }
 }

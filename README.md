@@ -2,31 +2,30 @@
 
 [![Build](https://github.com/yaa110/tokio-tun/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/yaa110/tokio-tun/actions/workflows/build.yml) [![crates.io](https://img.shields.io/crates/v/tokio-tun.svg)](https://crates.io/crates/tokio-tun) [![Documentation](https://img.shields.io/badge/docs-tokio--tun-blue.svg)](https://docs.rs/tokio-tun) [![examples](https://img.shields.io/badge/examples-tokio--tun-blue.svg)](examples)
 
-Asynchronous allocation of TUN/TAP devices in Rust using [`tokio`](https://crates.io/crates/tokio).
+Asynchronous allocation of TUN/TAP devices in Rust using [`Tokio`](https://crates.io/crates/tokio).
+
+`tokio-tun` is natively asynchronous. On every supported platform, packet I/O is registered with Tokio through [`AsyncFd`](https://docs.rs/tokio/latest/tokio/io/unix/struct.AsyncFd.html); there is no custom polling loop, blocking fallback, or private descriptor extraction.
 
 ## Getting Started
 
 - Create a tun device using `Tun::builder()` and read from it in a loop:
 
 ```rust
-use std::os::unix::io::AsRawFd;
-use std::sync::Arc;
+use std::os::fd::AsRawFd;
 use tokio_tun::Tun;
 
 #[tokio::main]
 async fn main() {
-    let tun = Arc::new(
-        Tun::builder()
-            .name("")            // if name is empty, then it is set by kernel.
-            .address("10.0.0.1".parse().unwrap(), 24) // can be called multiple times.
-            .destination("10.0.0.2".parse().unwrap())
-            .up()                // or bring the interface up manually.
-            .close_on_exec()     // or no_close_on_exec()
-            .build()
-            .unwrap()
-            .pop()
-            .unwrap(),
-    );
+    let tun = Tun::builder()
+        .name("") // if name is empty, then it is set by kernel.
+        .address("10.0.0.1".parse().unwrap(), 24) // can be called multiple times.
+        .destination("10.0.0.2".parse().unwrap())
+        .up() // or bring the interface up manually.
+        .close_on_exec() // or no_close_on_exec()
+        .build()
+        .unwrap()
+        .pop()
+        .unwrap();
 
     println!(
         "tun created, name: {}, index: {}, fd: {}",
@@ -35,15 +34,9 @@ async fn main() {
         tun.as_raw_fd()
     );
 
-    // Writer: simply clone Arced Tun.
-    let tun_c = tun.clone();
-    tokio::spawn(async move {
-        let buf = b"data to be written";
-        tun_c.send_all(buf).await.unwrap();
-    });
-
-    // Reader
-    let mut buf = [0u8; 1024];
+    // A TUN read returns one IP packet. Use a buffer at least as large as the
+    // interface MTU; 65,535 bytes covers the largest standard IP packet.
+    let mut buf = vec![0u8; 65_535];
     loop {
         let n = tun.recv(&mut buf).await.unwrap();
         println!("reading {} bytes: {:?}", n, &buf[..n]);
@@ -51,10 +44,13 @@ async fn main() {
 }
 ```
 
-- Run the code using `sudo`:
+Packets written back to a TUN device must be valid IPv4/IPv6 packets. Use
+`Tun::send`, `Tun::sendv`, or `Tun::send_all` with an IP packet payload.
+
+- Run one of the included examples using `sudo`:
 
 ```bash
-sudo -E $(which cargo) run
+sudo -E $(which cargo) run --example read
 ```
 
 ### Multiple addresses and IPv6
@@ -167,8 +163,10 @@ fn use_queue(fd: OwnedFd) -> std::io::Result<TunQueue> {
 `TunQueue::new` accepts any type that converts into an `OwnedFd`; it sets the
 descriptor to non-blocking mode. Since `O_NONBLOCK` belongs to the shared open
 file description, a descriptor received from another process also becomes
-non-blocking there. `FD_CLOEXEC` is left unchanged. On Linux `TunQueue` uses raw
-packet I/O, while on macOS it handles the `utun` header.
+non-blocking there. `FD_CLOEXEC` is left unchanged. On Linux, `TunQueue` uses
+the descriptor as-is, including packet information when enabled. Android and
+iOS bridges must provide raw IP packets. On macOS, `TunQueue` handles the
+`utun` header.
 
 ### Multi-queue with one queue (Linux only)
 
@@ -178,12 +176,17 @@ configuration when attaching an additional queue.
 
 ## Supported Platforms
 
-- [x] Linux
-- [x] macOS
-- [ ] FreeBSD
-- [ ] Android
-- [ ] iOS
-- [ ] Windows
+| Platform | TUN | TAP | Multi-Queue | Notes |
+|---|:---:|:---:|:---:|---|
+| Linux | ✅ | ✅ | ✅ | Full API |
+| macOS | ✅ | ❌ | ❌ | `utun`; TUN only |
+| Android | ✅ | ❌ | ❌ | `TunQueue` only; `VpnService` fd |
+| iOS | ✅ | ❌ | ❌ | `TunQueue` only; NetworkExtension bridge |
+| FreeBSD | ❌ | ❌ | ❌ | Not supported |
+
+Mobile support is I/O-only: it wraps an externally supplied packet descriptor
+and does not allocate devices or integrate with `VpnService` /
+`NEPacketTunnelFlow` directly.
 
 ### macOS limitations
 
@@ -197,11 +200,90 @@ macOS uses the built-in `utun` driver. Only layer-3 TUN is available:
 - Packets larger than the receive buffer return an error on macOS instead of being truncated.
 - `utun` creation requires root privileges.
 
+### Android
+
+`Tun` and `TunBuilder` are not available on Android. Android apps cannot open
+`/dev/net/tun`; use `TunQueue` with the file descriptor provided by
+`VpnService`:
+
+```rust
+use std::os::fd::{FromRawFd, OwnedFd, RawFd};
+use tokio_tun::TunQueue;
+
+// `VpnService.establish()` returns a ParcelFileDescriptor. Detach it on the
+// Java/Kotlin side, then transfer ownership of the raw fd to Rust. Call this
+// inside a Tokio runtime with I/O enabled.
+//
+// # Safety
+//
+// `raw_fd` must be open, valid, and owned by the caller. Do not close it after
+// transferring ownership to this function.
+unsafe fn wrap(raw_fd: RawFd) -> std::io::Result<TunQueue> {
+    // SAFETY: the caller transfers ownership of `raw_fd`.
+    let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+    TunQueue::try_from(fd)
+}
+```
+
+- Call `ParcelFileDescriptor.detachFd()` (not `getFd()`) and transfer that raw
+  descriptor to `TunQueue`. `TunQueue` owns it and closes it on drop; do not
+  close it manually while `TunQueue` owns it.
+- Configure addresses, routes, MTU, DNS, and allowed applications with
+  `VpnService.Builder`. Protect the `VpnService` declaration with the
+  `BIND_VPN_SERVICE` permission and obtain user consent through
+  `VpnService.prepare()`.
+- The descriptor must carry raw IP packets. Each `recv` returns one packet;
+  size receive buffers to at least the MTU because raw reads can truncate
+  larger packets.
+- Use `VpnService.protect()` for sockets that must bypass the tunnel.
+- `TunQueue` leaves `FD_CLOEXEC` unchanged. Set it if the process may `exec` a
+  child and should not leak the VPN descriptor.
+- No root access is required.
+
+### iOS
+
+`Tun` and `TunBuilder` are not available on iOS. iOS does not expose a public
+TUN/TAP file descriptor:
+
+- Apps cannot open `/dev/net/tun` or allocate a `utun` device directly. This
+  crate does not attempt device allocation on iOS.
+- A packet tunnel must run in a Network Extension `NEPacketTunnelProvider` app
+  extension. `NEPacketTunnelFlow` is an object API for reading and writing
+  packets; it is not a file descriptor.
+- Do not extract a descriptor through private KVO paths such as
+  `socket.fileDescriptor`. That is non-public API, risks App Store rejection,
+  and can break across iOS releases.
+- Network Extension processes have tight memory limits. Avoid unbounded packet
+  queues and large temporary buffers.
+
+`TunQueue` therefore works only with a raw packet descriptor supplied by an
+app-level bridge:
+
+- `NEPacketTunnelFlow` is available only inside the `NEPacketTunnelProvider`
+  extension process. Run the bridge and the Rust code using `TunQueue` in that
+  extension; if the containing app owns them, the fd must be passed across the
+  process boundary explicitly.
+- Bridge `NEPacketTunnelFlow` packets to a datagram socket pair and pass the
+  Rust end to `TunQueue`.
+- Preserve packet boundaries; use `SOCK_DGRAM` or an equivalent packet-oriented
+  transport. Each `recv` returns one packet; size receive buffers to at least
+  the MTU because datagram reads can truncate larger packets.
+- Configure addresses, routes, DNS, and MTU with
+  `NEPacketTunnelNetworkSettings`.
+- The descriptor must carry raw IP packets, without a `utun` header.
+- `TunQueue` leaves `FD_CLOEXEC` unchanged; set it if your extension may `exec`
+  a child process.
+- Requires the Network Extension entitlement
+  (`com.apple.developer.networking.networkextension` with
+  `packet-tunnel-provider`) and user approval. No root access is required.
+
 ## Examples
 
 - [`read`](examples/read.rs): Create a TUN device and read packets from it.
 - [`read-mq`](examples/read-mq.rs): Read from multi-queue tun using `tokio::select!` (Linux only).
 - [`multiple-addresses`](examples/multiple-addresses.rs): Assign multiple IPv4 and IPv6 addresses to one tun.
+- [`android`](examples/android/README.md): Android `VpnService` + Kotlin/JNI + Rust `TunQueue` bridge.
+- [`ios`](examples/ios/README.md): iOS `NEPacketTunnelProvider` + Swift socket-pair + Rust `TunQueue` bridge.
 
 ```bash
 sudo -E $(which cargo) run --example read

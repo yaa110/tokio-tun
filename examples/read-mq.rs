@@ -50,9 +50,9 @@ async fn main() {
     let tun1 = Arc::new(tuns.next().unwrap());
     let tun2 = Arc::new(tuns.next().unwrap());
 
-    let mut buf0 = [0u8; 1024];
-    let mut buf1 = [0u8; 1024];
-    let mut buf2 = [0u8; 1024];
+    let mut buf0 = vec![0u8; 65_535];
+    let mut buf1 = vec![0u8; 65_535];
+    let mut buf2 = vec![0u8; 65_535];
 
     loop {
         let (buf, id) = tokio::select! {
