@@ -20,6 +20,7 @@ pub struct TunBuilder {
     mtu: Option<i32>,
     owner: Option<i32>,
     group: Option<i32>,
+    mac_address: Option<[u8; 6]>,
     addresses: Vec<AddressConfig>,
     invalid_reason: Option<&'static str>,
     queues: Option<usize>,
@@ -37,6 +38,7 @@ impl Default for TunBuilder {
             up: false,
             mtu: None,
             packet_info: false,
+            mac_address: None,
             addresses: Vec::new(),
             invalid_reason: None,
             queues: None,
@@ -121,6 +123,17 @@ impl TunBuilder {
     /// This is the numeric GID of the group that will own the created device.
     pub fn group(mut self, group: i32) -> Self {
         self.group = Some(group);
+        self
+    }
+
+    /// Sets the MAC address of a TAP device.
+    ///
+    /// MAC addresses are only supported for TAP devices, so this method must be
+    /// used together with [`tap`](TunBuilder::tap); otherwise
+    /// [`build`](TunBuilder::build) returns an error. The address must be a
+    /// non-zero unicast address.
+    pub fn mac_address(mut self, mac: [u8; 6]) -> Self {
+        self.mac_address = Some(mac);
         self
     }
 
@@ -286,6 +299,17 @@ impl TunBuilder {
             )
             .into());
         }
+        if let Some(mac) = self.mac_address {
+            if !self.is_tap {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "MAC address is only supported for TAP devices",
+                )
+                .into());
+            }
+            crate::address::validate_mac(mac)
+                .map_err(|reason| std::io::Error::new(std::io::ErrorKind::InvalidInput, reason))?;
+        }
         for address in &self.addresses {
             address
                 .validate()
@@ -316,6 +340,7 @@ impl From<TunBuilder> for Params {
             mtu: builder.mtu,
             owner: builder.owner,
             group: builder.group,
+            mac_address: builder.mac_address,
             addresses: builder.addresses,
             cloexec: builder.cloexec,
         }
@@ -456,6 +481,53 @@ mod tests {
     fn build_rejects_invalid_queue_counts() {
         assert_invalid_input(TunBuilder::new().queues(0).build());
         assert_invalid_input(TunBuilder::new().queues(257).build());
+    }
+
+    #[test]
+    fn build_rejects_mac_address_for_tun() {
+        assert_invalid_input(
+            TunBuilder::new()
+                .mac_address([0x02, 0x11, 0x22, 0x33, 0x44, 0x55])
+                .build(),
+        );
+    }
+
+    #[test]
+    fn build_rejects_invalid_mac_addresses() {
+        assert_invalid_input(
+            TunBuilder::new()
+                .tap()
+                .mac_address([0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+                .build(),
+        );
+        assert_invalid_input(
+            TunBuilder::new()
+                .tap()
+                .mac_address([0x01, 0x11, 0x22, 0x33, 0x44, 0x55])
+                .build(),
+        );
+    }
+
+    #[test]
+    fn validate_accepts_mac_address_for_tap() {
+        assert!(
+            TunBuilder::new()
+                .tap()
+                .mac_address([0x02, 0x11, 0x22, 0x33, 0x44, 0x55])
+                .validate()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn mac_address_can_be_set_before_tap() {
+        assert!(
+            TunBuilder::new()
+                .mac_address([0x02, 0x11, 0x22, 0x33, 0x44, 0x55])
+                .tap()
+                .validate()
+                .is_ok()
+        );
     }
 
     #[test]

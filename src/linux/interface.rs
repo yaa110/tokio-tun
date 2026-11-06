@@ -45,6 +45,7 @@ pub struct Interface {
     socket: i32,
     index: u32,
     name: String,
+    is_tap: bool,
 }
 
 impl Interface {
@@ -56,6 +57,7 @@ impl Interface {
             );
         }
 
+        let is_tap = (flags & (libc::IFF_TAP as i16)) != 0;
         let extra_flags = if cloexec { libc::O_CLOEXEC } else { 0 };
         let mut req = ifreq::new(name);
         if fds.len() > 1 {
@@ -104,6 +106,7 @@ impl Interface {
             socket,
             index,
             name,
+            is_tap,
         })
     }
 
@@ -117,6 +120,9 @@ impl Interface {
         }
         if let Some(group) = params.group {
             self.group(group)?;
+        }
+        if let Some(mac) = params.mac_address {
+            self.set_mac_address(mac)?;
         }
 
         let broadcast_capable = (self.flags(None)? & (libc::IFF_BROADCAST as i16)) != 0;
@@ -203,6 +209,61 @@ impl Interface {
         ioctl_read(self.socket, libc::SIOCGIFBRDADDR as libc::Ioctl, &mut req)?;
         let broadcast = unsafe { req.ifr_ifru.ifru_broadaddr };
         Ok(ipv4_from_sockaddr(broadcast))
+    }
+
+    pub fn mac_address(&self) -> Result<[u8; 6]> {
+        self.verify_index()?;
+        if !self.is_tap {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "interface has no hardware address",
+            )
+            .into());
+        }
+
+        let mut req = ifreq::new(self.name());
+        ioctl_read(self.socket, libc::SIOCGIFHWADDR as libc::Ioctl, &mut req)?;
+        let hwaddr = unsafe { req.ifr_ifru.ifru_hwaddr };
+        if hwaddr.sa_family != libc::ARPHRD_ETHER {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "interface has no hardware address",
+            )
+            .into());
+        }
+        let mut mac = [0u8; 6];
+        for (dst, src) in mac.iter_mut().zip(&hwaddr.sa_data[..6]) {
+            // `c_char` is signed on some targets and unsigned on others;
+            // going through its one-byte representation preserves the octet.
+            *dst = src.to_ne_bytes()[0];
+        }
+        Ok(mac)
+    }
+
+    pub fn set_mac_address(&self, mac: [u8; 6]) -> Result<()> {
+        self.verify_index()?;
+        // TUN devices report no hardware address. Detecting this from the
+        // device type avoids an extra ioctl and lets all TUN MAC operations
+        // return a consistent `Unsupported` error.
+        if !self.is_tap {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "interface has no hardware address",
+            )
+            .into());
+        }
+        crate::address::validate_mac(mac)
+            .map_err(|reason| io::Error::new(io::ErrorKind::InvalidInput, reason))?;
+
+        let mut req = ifreq::new(self.name());
+        // SAFETY: `ifreq` is fully initialized before the ioctl call.
+        unsafe {
+            req.ifr_ifru.ifru_hwaddr.sa_family = libc::ARPHRD_ETHER;
+            for (dst, src) in req.ifr_ifru.ifru_hwaddr.sa_data.iter_mut().zip(mac) {
+                *dst = libc::c_char::from_ne_bytes([src]);
+            }
+        }
+        ioctl_write(self.socket, libc::SIOCSIFHWADDR as libc::Ioctl, &req)
     }
 
     pub fn flags(&self, flags: Option<i16>) -> Result<i16> {

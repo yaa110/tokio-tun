@@ -122,6 +122,28 @@ ip tuntap
 sudo tshark -i <tun-name>
 ```
 
+### MAC address (TAP only)
+
+TAP devices have a MAC address; TUN devices do not. Set it when building the
+device, or read and change it at runtime:
+
+```rust
+use tokio_tun::Tun;
+
+let tap = Tun::builder()
+    .tap()
+    .mac_address([0x02, 0x11, 0x22, 0x33, 0x44, 0x55])
+    .build()
+    .unwrap()
+    .pop()
+    .unwrap();
+
+let mac = tap.mac_address().unwrap();
+println!("MAC address: {mac:?}");
+tap.set_mac_address([0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee])
+    .unwrap();
+```
+
 ## Supported Platforms
 
 - [x] Linux

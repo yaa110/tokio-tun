@@ -164,6 +164,91 @@ async fn test_tap_auto_broadcast() {
 }
 
 #[tokio::test]
+async fn test_tap_mac_address() {
+    let tun = skip_without_cap_net_admin!(
+        Tun::builder()
+            .name("tapmac0")
+            .tap()
+            .mac_address([0x02, 0x11, 0x22, 0x33, 0x44, 0x55])
+            .up()
+            .build()
+    )
+    .pop()
+    .expect("tap instance");
+
+    assert_eq!(
+        tun.mac_address().unwrap(),
+        [0x02, 0x11, 0x22, 0x33, 0x44, 0x55]
+    );
+
+    tun.set_mac_address([0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee])
+        .unwrap();
+    assert_eq!(
+        tun.mac_address().unwrap(),
+        [0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]
+    );
+
+    for mac in [[0x01, 0x00, 0x00, 0x00, 0x00, 0x00], [0x00; 6], [0xff; 6]] {
+        match tun.set_mac_address(mac) {
+            Err(tokio_tun::Error::IoError(err)) => {
+                assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput)
+            }
+            Ok(()) => panic!("expected invalid MAC address error for {mac:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_multi_queue_tap_mac_address() {
+    let tuns = skip_without_cap_net_admin!(
+        Tun::builder()
+            .name("")
+            .tap()
+            .queues(2)
+            .mac_address([0x02, 0x11, 0x22, 0x33, 0x44, 0x55])
+            .build()
+    );
+
+    assert_eq!(tuns.len(), 2);
+    for tun in &tuns {
+        assert_eq!(
+            tun.mac_address().unwrap(),
+            [0x02, 0x11, 0x22, 0x33, 0x44, 0x55]
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_tun_mac_address_unsupported() {
+    let tun = skip_without_cap_net_admin!(Tun::builder().name("tunmac0").build())
+        .pop()
+        .expect("tun instance");
+
+    match tun.mac_address() {
+        Err(tokio_tun::Error::IoError(err)) => {
+            assert_eq!(err.kind(), std::io::ErrorKind::Unsupported)
+        }
+        Ok(mac) => panic!("expected unsupported error, got {mac:?}"),
+    }
+
+    match tun.set_mac_address([0x02, 0x11, 0x22, 0x33, 0x44, 0x55]) {
+        Err(tokio_tun::Error::IoError(err)) => {
+            assert_eq!(err.kind(), std::io::ErrorKind::Unsupported)
+        }
+        Ok(()) => panic!("expected unsupported error"),
+    }
+
+    // Device-type detection must win over argument validation so that every
+    // MAC operation on a TUN consistently reports `Unsupported`.
+    match tun.set_mac_address([0x00; 6]) {
+        Err(tokio_tun::Error::IoError(err)) => {
+            assert_eq!(err.kind(), std::io::ErrorKind::Unsupported)
+        }
+        Ok(()) => panic!("expected unsupported error"),
+    }
+}
+
+#[tokio::test]
 async fn test_failed_build_does_not_leave_interface() {
     let _check = skip_without_cap_net_admin!(Tun::builder().name("").build());
 

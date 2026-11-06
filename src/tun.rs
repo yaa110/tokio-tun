@@ -408,6 +408,23 @@ impl Tun {
         self.iface.broadcast()
     }
 
+    /// Returns the MAC address of the TAP device.
+    ///
+    /// TUN devices have no hardware address on Linux, so this returns an
+    /// [`Unsupported`](std::io::ErrorKind::Unsupported) error for them.
+    pub fn mac_address(&self) -> Result<[u8; 6]> {
+        self.iface.mac_address()
+    }
+
+    /// Sets the MAC address of the TAP device.
+    ///
+    /// The address must be a non-zero unicast address. TUN devices have no
+    /// hardware address and return an
+    /// [`Unsupported`](std::io::ErrorKind::Unsupported) error.
+    pub fn set_mac_address(&self, mac: [u8; 6]) -> Result<()> {
+        self.iface.set_mac_address(mac)
+    }
+
     /// Returns the IPv4 netmask of the device.
     pub fn netmask(&self) -> Result<Ipv4Addr> {
         self.iface.netmask()

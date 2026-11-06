@@ -17,6 +17,16 @@ pub(crate) fn ipv4_broadcast(address: Ipv4Addr, prefix_len: u8) -> Option<Ipv4Ad
     Some(Ipv4Addr::from((network | !mask).to_be_bytes()))
 }
 
+pub(crate) fn validate_mac(mac: [u8; 6]) -> std::result::Result<(), &'static str> {
+    if mac == [0; 6] {
+        return Err("MAC address must not be all zeros");
+    }
+    if mac[0] & 1 != 0 {
+        return Err("MAC address must be unicast");
+    }
+    Ok(())
+}
+
 /// Information about an address assigned to a Tun/Tap interface.
 ///
 /// See [`Tun::addresses`](crate::Tun::addresses) for retrieving all addresses

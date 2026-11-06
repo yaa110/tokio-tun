@@ -10,6 +10,7 @@ pub struct Params {
     pub mtu: Option<i32>,
     pub owner: Option<i32>,
     pub group: Option<i32>,
+    pub mac_address: Option<[u8; 6]>,
     pub addresses: Vec<AddressConfig>,
     pub cloexec: bool,
 }
