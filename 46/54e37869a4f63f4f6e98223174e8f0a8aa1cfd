@@ -1,0 +1,34 @@
+src/address.rs
+  h_20fc4d483d1064 55-58,80-83,99-102
+README.md
+  h_20fc4d483d1064 23,100-109
+src/tun.rs
+  s_5b9c3582411017::t_2d9c6f0ecd392f 141-143
+tests/tun_test.rs
+  s_5b9c3582411017::t_a72fbf5a6f47c8 260-261,293,295-296
+  s_5b9c3582411017::t_1c7077f7b495f7 257-259
+  h_20fc4d483d1064 254-255
+src/linux/interface.rs
+  h_20fc4d483d1064 12,14-22,24-32,34-41,66,68,187,189,196,203,210,213,220,227,234
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "4654e37869a4f63f4f6e98223174e8f0a8aa1cfd",
+  "prompts": {},
+  "humans": {
+    "h_20fc4d483d1064": {
+      "author": "Navid <3187511+yaa110@users.noreply.github.com>"
+    }
+  },
+  "sessions": {
+    "s_5b9c3582411017": {
+      "agent_id": {
+        "tool": "gemini",
+        "id": "34e9a404-c404-4818-83c3-c59be4f59de7",
+        "model": "gemini-3.8-flash"
+      },
+      "human_author": null
+    }
+  }
+}
