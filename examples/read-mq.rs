@@ -1,8 +1,13 @@
+#[cfg(target_os = "linux")]
 use std::net::{IpAddr, Ipv4Addr};
+#[cfg(target_os = "linux")]
 use std::os::unix::io::AsRawFd;
+#[cfg(target_os = "linux")]
 use std::sync::Arc;
+#[cfg(target_os = "linux")]
 use tokio_tun::Tun;
 
+#[cfg(target_os = "linux")]
 #[tokio::main]
 async fn main() {
     let queues = 3;
@@ -37,7 +42,7 @@ async fn main() {
     );
 
     println!("---------------------");
-    println!("ping 10.1.0.2 to test");
+    println!("ping 10.1.0.1 to test");
     println!("---------------------");
 
     let mut tuns = tuns.into_iter();
@@ -57,4 +62,9 @@ async fn main() {
         };
         println!("reading {} bytes from tuns[{}]: {:?}", buf.len(), id, buf);
     }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn main() {
+    eprintln!("This example requires Linux multi-queue TUN/TAP support.");
 }

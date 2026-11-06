@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 use std::io::IoSlice;
 use std::net::{IpAddr, Ipv4Addr};
 use std::os::unix::io::AsRawFd;

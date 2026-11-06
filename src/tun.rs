@@ -1,12 +1,22 @@
 use crate::Result;
 use crate::TunBuilder;
 use crate::address::AddressInfo;
+#[cfg(target_os = "linux")]
 use crate::linux::interface::{Interface, set_persist};
+#[cfg(target_os = "linux")]
 use crate::linux::io::TunIo;
+#[cfg(target_os = "linux")]
 use crate::linux::params::Params;
+#[cfg(target_os = "macos")]
+use crate::macos::interface::Interface;
+#[cfg(target_os = "macos")]
+use crate::macos::io::TunIo;
+#[cfg(target_os = "macos")]
+use crate::macos::params::Params;
 use std::io::{self, ErrorKind, IoSlice, Read, Write};
 use std::net::{IpAddr, Ipv4Addr};
 use std::os::fd::OwnedFd;
+#[cfg(target_os = "linux")]
 use std::os::raw::c_char;
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use std::pin::Pin;
@@ -15,8 +25,10 @@ use std::task::{self, Context, Poll};
 use tokio::io::unix::AsyncFd;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
+#[cfg(target_os = "linux")]
 static TUN: &[u8] = b"/dev/net/tun\0";
 
+#[cfg(target_os = "linux")]
 fn close_fds(fds: &[i32]) {
     for &fd in fds {
         unsafe { libc::close(fd) };
@@ -121,6 +133,7 @@ impl Tun {
 
     /// Creates a new instance of Tun/Tap device.
     pub(crate) fn new(params: Params) -> Result<Self> {
+        #[cfg(target_os = "linux")]
         let persist = params.persist;
         let mut iface = Self::allocate(params, 1)?;
         let mut fds: Vec<OwnedFd> = iface
@@ -128,7 +141,12 @@ impl Tun {
             .into_iter()
             .map(|fd| unsafe { OwnedFd::from_raw_fd(fd) })
             .collect();
-        let fd = fds.pop().expect("exactly one file descriptor");
+        let fd = fds.pop().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "expected exactly one file descriptor",
+            )
+        })?;
         // SAFETY: `fd` is an open and valid file descriptor whose ownership is
         // transferred to `TunIo`, and it remains valid for the lifetime of
         // `AsyncFd`.
@@ -138,6 +156,7 @@ impl Tun {
             iface: Arc::new(iface),
             io,
         };
+        #[cfg(target_os = "linux")]
         if persist && let Err(err) = set_persist(tun.as_raw_fd(), true) {
             let _ = set_persist(tun.as_raw_fd(), false);
             return Err(err);
@@ -146,6 +165,7 @@ impl Tun {
     }
 
     /// Creates a new instance of Tun/Tap device.
+    #[cfg(target_os = "linux")]
     pub(crate) fn new_mq(params: Params, queues: usize) -> Result<Vec<Self>> {
         if queues == 0 {
             return Err(std::io::Error::new(
@@ -154,6 +174,7 @@ impl Tun {
             )
             .into());
         }
+        #[cfg(target_os = "linux")]
         let persist = params.persist;
         let mut iface = Self::allocate(params, queues)?;
         let fds: Vec<OwnedFd> = iface
@@ -174,6 +195,7 @@ impl Tun {
                 io,
             });
         }
+        #[cfg(target_os = "linux")]
         if persist {
             for tun in &tuns {
                 if let Err(err) = set_persist(tun.as_raw_fd(), true) {
@@ -187,6 +209,7 @@ impl Tun {
         Ok(tuns)
     }
 
+    #[cfg(target_os = "linux")]
     fn allocate(params: Params, queues: usize) -> Result<Interface> {
         let extra_flags = if params.cloexec { libc::O_CLOEXEC } else { 0 };
 
@@ -213,6 +236,21 @@ impl Tun {
             params.cloexec,
         )?;
         iface.init(params)?;
+        Ok(iface)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn allocate(params: Params, queues: usize) -> Result<Interface> {
+        if queues != 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "multi-queue is not supported on macOS",
+            )
+            .into());
+        }
+
+        let iface = Interface::new(&params)?;
+        iface.init(&params)?;
         Ok(iface)
     }
 
@@ -277,8 +315,7 @@ impl Tun {
     /// written or an error occurs. This method will not return until all data has
     /// been written.
     ///
-    /// This implementation provides optimal performance for high-throughput scenarios
-    /// by advancing buffers in-place without allocations.
+    /// This implementation advances the buffers in place as data is written.
     ///
     /// # Errors
     ///
@@ -346,10 +383,12 @@ impl Tun {
     /// Returns all IPv4 and IPv6 addresses assigned to the device.
     ///
     /// Each entry contains the address, its prefix length, and any configured
-    /// point-to-point destination or IPv4 broadcast address.
+    /// point-to-point destination or IPv4 broadcast address. On macOS, IPv6
+    /// point-to-point destinations are not reported by `getifaddrs`.
     ///
-    /// This method performs a synchronous netlink dump and should not be called
-    /// from latency-sensitive async code.
+    /// This method performs synchronous platform-specific I/O (netlink on
+    /// Linux, `getifaddrs` on macOS) and should not be called from
+    /// latency-sensitive async code.
     ///
     /// ```no_run
     /// # use tokio_tun::Tun;
@@ -389,7 +428,9 @@ impl Tun {
     /// Returns the first point-to-point destination address of the device.
     ///
     /// The result is the first peer reported by the system, not necessarily
-    /// the first one configured.
+    /// the first one configured. On macOS, IPv6 point-to-point destinations
+    /// are not reported by `getifaddrs`, so IPv6-only setups may return
+    /// [`AddrNotAvailable`](std::io::ErrorKind::AddrNotAvailable).
     pub fn destination(&self) -> Result<IpAddr> {
         self.addresses()?
             .iter()
@@ -404,14 +445,16 @@ impl Tun {
     }
 
     /// Returns the IPv4 broadcast address of the device.
+    #[cfg(target_os = "linux")]
     pub fn broadcast(&self) -> Result<Ipv4Addr> {
         self.iface.broadcast()
     }
 
     /// Returns the MAC address of the TAP device.
     ///
-    /// TUN devices have no hardware address on Linux, so this returns an
+    /// TUN devices have no hardware address, so this returns an
     /// [`Unsupported`](std::io::ErrorKind::Unsupported) error for them.
+    #[cfg(target_os = "linux")]
     pub fn mac_address(&self) -> Result<[u8; 6]> {
         self.iface.mac_address()
     }
@@ -421,6 +464,7 @@ impl Tun {
     /// The address must be a non-zero unicast address. TUN devices have no
     /// hardware address and return an
     /// [`Unsupported`](std::io::ErrorKind::Unsupported) error.
+    #[cfg(target_os = "linux")]
     pub fn set_mac_address(&self, mac: [u8; 6]) -> Result<()> {
         self.iface.set_mac_address(mac)
     }
@@ -436,7 +480,7 @@ impl Tun {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use std::os::fd::IntoRawFd;

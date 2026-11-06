@@ -15,8 +15,52 @@ jobs:
           components: rustfmt, clippy
       - run: cargo test
       - run: cargo fmt -- --check
-      - run: cargo clippy
+      - run: cargo clippy --all-targets -- -D warnings
       - run: cargo build
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - name: test and build
+        uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          components: rustfmt, clippy
+      - run: cargo test
+      - run: cargo fmt -- --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo build
+      - name: check macOS API surface
+        run: |
+          cargo doc --no-deps
+          for method in tap packet_info queues persist owner group mac_address broadcast; do
+            if grep -q "method.$method" target/doc/tokio_tun/struct.TunBuilder.html; then
+              echo "unexpected macOS TunBuilder::$method"
+              exit 1
+            fi
+          done
+          for method in broadcast mac_address set_mac_address; do
+            if grep -q "method.$method" target/doc/tokio_tun/struct.Tun.html; then
+              echo "unexpected macOS Tun::$method"
+              exit 1
+            fi
+          done
+      - name: check minimum libc
+        run: |
+          cargo update -p libc --precise 0.2.186
+          cargo check --all-targets
+      - name: run utun tests with root
+        env:
+          TOKIO_TUN_REQUIRE_PRIVILEGED: "1"
+          CARGO_TARGET_DIR: ${{ runner.temp }}/tokio-tun-target
+        run: |
+          sudo env \
+            "PATH=$PATH" \
+            "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" \
+            "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" \
+            "CARGO_TARGET_DIR=$CARGO_TARGET_DIR" \
+            "TOKIO_TUN_REQUIRE_PRIVILEGED=$TOKIO_TUN_REQUIRE_PRIVILEGED" \
+            cargo test --test macos_test
   integration:
     runs-on: ubuntu-latest
     timeout-minutes: 30

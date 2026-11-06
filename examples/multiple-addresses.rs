@@ -15,7 +15,6 @@ async fn main() {
             .address(IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)), 24)
             // Multiple IPv6 addresses, each with its own prefix length.
             .address(IpAddr::V6(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1)), 64)
-            .destination(IpAddr::V6(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2)))
             .address(IpAddr::V6(Ipv6Addr::new(0xfd00, 0, 0, 1, 0, 0, 0, 1)), 64)
             .up()
             .build()
