@@ -1,0 +1,71 @@
+src/tun.rs
+  s_5b9c3582411017::t_3f2105f315fa69 458
+  s_5b9c3582411017::t_88b564d64f0976 452-454
+  s_5b9c3582411017::t_5dce44fc4f01b9 508-510
+  s_5b9c3582411017::t_8ce5936c2ca9c0 512-514
+  s_5b9c3582411017::t_9c15566164cc98 129-131
+  s_5b9c3582411017::t_2d9c6f0ecd392f 132-137,140-147,152-165,168-173,455,511
+  h_20fc4d483d1064 3-4,8-9,11,20-25,124-128,177-187,195-198,201-209,256,348-388,391-405,408,410,413,415,433-436,439-451,485-507,515-523
+src/linux/netlink.rs
+  h_20fc4d483d1064 1-697
+src/lib.rs
+  h_20fc4d483d1064 6,11,16
+Cargo.toml
+  h_20fc4d483d1064 13-14
+src/linux/params.rs
+  h_20fc4d483d1064 1,13
+src/builder.rs
+  h_20fc4d483d1064 2,8-11,23-24,40-41,54-57,78-79,127,129-133,135-154,158-159,161-164,166-168,170-191,195-199,201-209,252-253,255,261-295,319,329-477
+  h_20fc4d483d1064 134,169
+examples/multiple-addresses.rs
+  h_20fc4d483d1064 1-42
+examples/read-mq.rs
+  h_20fc4d483d1064 1,14-16
+src/linux/io.rs
+  h_20fc4d483d1064 89
+tests/tun_test.rs
+  h_20fc4d483d1064 2,61-62,73-76,78-81,87-197,234-235,275-276
+  s_5b9c3582411017::t_29dff05ece868d 258
+  s_5b9c3582411017::t_0692e96442ae8d 12-32
+  s_5b9c3582411017::t_a72fbf5a6f47c8 262-263,298-299
+  s_5b9c3582411017::t_de4320b4fa502f 264
+  s_5b9c3582411017::t_784e843c2bc190 300
+  s_5b9c3582411017::t_f4297839a45fc7 297
+  s_5b9c3582411017::t_1c7077f7b495f7 259-261
+.github/workflows/build.yml
+  h_20fc4d483d1064 20-45
+src/address.rs
+  h_20fc4d483d1064 1-305
+src/linux/interface.rs
+  h_20fc4d483d1064 4-6,8-9,25-26,30,36-42,50-83,85,88-90,95,105-120,122-123,130-150,157,159-164,178,181-182,185,188-189,215,217-219,225-245,252,259-279
+src/linux/address.rs
+  h_20fc4d483d1064 5-8,16,18-22
+examples/read.rs
+  h_20fc4d483d1064 1,15-17
+src/linux/request.rs
+  s_5b9c3582411017::t_99b4bdc568ca87 94,97-98,101-107
+  h_20fc4d483d1064 65-69,81-83
+README.md
+  h_20fc4d483d1064 12-15,23-24,64,70-128,155,160
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "171ab86e2c7b1ee57a39d55c6f3fe4134d9dadca",
+  "prompts": {},
+  "humans": {
+    "h_20fc4d483d1064": {
+      "author": "Navid <3187511+yaa110@users.noreply.github.com>"
+    }
+  },
+  "sessions": {
+    "s_5b9c3582411017": {
+      "agent_id": {
+        "tool": "gemini",
+        "id": "34e9a404-c404-4818-83c3-c59be4f59de7",
+        "model": "gemini-3.8-flash"
+      },
+      "human_author": null
+    }
+  }
+}
