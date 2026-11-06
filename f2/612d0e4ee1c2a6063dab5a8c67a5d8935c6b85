@@ -1,0 +1,16 @@
+README.md
+  h_20fc4d483d1064 23
+src/linux/interface.rs
+  h_20fc4d483d1064 12,14-22,24-32,34-41,66,68,187,189,196,203,210,213,220,227,234
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f2612d0e4ee1c2a6063dab5a8c67a5d8935c6b85",
+  "prompts": {},
+  "humans": {
+    "h_20fc4d483d1064": {
+      "author": "Navid <3187511+yaa110@users.noreply.github.com>"
+    }
+  }
+}
