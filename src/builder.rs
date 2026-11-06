@@ -96,11 +96,15 @@ impl TunBuilder {
         self
     }
 
-    /// Builds multiple instances of [`Tun`](struct.Tun.html) with `IFF_MULTI_QUEUE` flag.
+    /// Builds one or more instances of [`Tun`](struct.Tun.html) with the
+    /// `IFF_MULTI_QUEUE` flag.
     ///
-    /// Internally this creates multiple file descriptors to parallelize packet sending and receiving.
-    /// The value must be between `1` and `256` inclusive; otherwise
-    /// [`build`](TunBuilder::build) returns an error. Default value is `1`.
+    /// The device is opened in multi-queue mode even when `queues` is `1`, so
+    /// more queues can be opened later. When attaching an additional queue,
+    /// use the same interface name and `.queues(...)` without repeating the
+    /// address configuration. If this method is not called, the device is
+    /// opened in single-queue mode. The value must be between `1` and `256`
+    /// inclusive; otherwise [`build`](TunBuilder::build) returns an error.
     #[cfg(target_os = "linux")]
     pub fn queues(mut self, queues: usize) -> Self {
         self.queues = Some(queues);
@@ -301,9 +305,7 @@ impl TunBuilder {
     pub fn build(self) -> Result<Vec<Tun>> {
         self.validate()?;
         #[cfg(target_os = "linux")]
-        if let Some(queues) = self.queues
-            && queues > 1
-        {
+        if let Some(queues) = self.queues {
             return Tun::new_mq(self.into(), queues);
         }
         Tun::new(self.into()).map(|tun| vec![tun])

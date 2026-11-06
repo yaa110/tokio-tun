@@ -1,6 +1,6 @@
 # Tokio TUN/TAP
 
-[![Build](https://github.com/yaa110/tokio-tun/workflows/Build/badge.svg)](https://github.com/yaa110/tokio-tun/actions) [![crates.io](https://img.shields.io/crates/v/tokio-tun.svg)](https://crates.io/crates/tokio-tun) [![Documentation](https://img.shields.io/badge/docs-tokio--tun-blue.svg)](https://docs.rs/tokio-tun) [![examples](https://img.shields.io/badge/examples-tokio--tun-blue.svg)](examples)
+[![Build](https://github.com/yaa110/tokio-tun/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/yaa110/tokio-tun/actions/workflows/build.yml) [![crates.io](https://img.shields.io/crates/v/tokio-tun.svg)](https://crates.io/crates/tokio-tun) [![Documentation](https://img.shields.io/badge/docs-tokio--tun-blue.svg)](https://docs.rs/tokio-tun) [![examples](https://img.shields.io/badge/examples-tokio--tun-blue.svg)](examples)
 
 Asynchronous allocation of TUN/TAP devices in Rust using [`tokio`](https://crates.io/crates/tokio).
 
@@ -140,6 +140,41 @@ println!("MAC address: {mac:?}");
 tap.set_mac_address([0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee])
     .unwrap();
 ```
+
+### Passing a device queue to another process
+
+`TunQueue` owns the packet queue, but not the interface accessors. Converting a
+`Tun` into a `TunQueue` drops those accessors, so capture anything you need
+(such as the interface name) first. The queue's descriptor can then be passed
+to another process as an `OwnedFd`:
+
+```rust
+use std::os::fd::OwnedFd;
+use tokio_tun::{Tun, TunQueue};
+
+fn queue_fd(tun: Tun) -> OwnedFd {
+    let queue: TunQueue = tun.into();
+    queue.into()
+}
+
+// In the receiving process, after taking ownership of the descriptor. Call
+// this inside a Tokio runtime with I/O enabled.
+fn use_queue(fd: OwnedFd) -> std::io::Result<TunQueue> {
+    TunQueue::new(fd)
+}
+```
+
+`TunQueue::new` accepts any type that converts into an `OwnedFd`; it sets the
+descriptor to non-blocking mode. Since `O_NONBLOCK` belongs to the shared open
+file description, a descriptor received from another process also becomes
+non-blocking there. `FD_CLOEXEC` is left unchanged. On Linux `TunQueue` uses raw
+packet I/O, while on macOS it handles the `utun` header.
+
+### Multi-queue with one queue (Linux only)
+
+`queues(1)` opens the device with `IFF_MULTI_QUEUE`, so additional queues can
+be attached later using the same interface name. Do not repeat address
+configuration when attaching an additional queue.
 
 ## Supported Platforms
 

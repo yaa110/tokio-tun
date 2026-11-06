@@ -1,11 +1,19 @@
 use std::io::{self, IoSlice, Read, Write};
-use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 
 pub struct TunIo(RawFd);
 
 impl FromRawFd for TunIo {
     unsafe fn from_raw_fd(fd: RawFd) -> Self {
         Self(fd)
+    }
+}
+
+impl IntoRawFd for TunIo {
+    fn into_raw_fd(self) -> RawFd {
+        // Avoid running `Drop`, which would close the descriptor.
+        let this = std::mem::ManuallyDrop::new(self);
+        this.0
     }
 }
 
