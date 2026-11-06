@@ -1,0 +1,66 @@
+src/address.rs
+  h_20fc4d483d1064 1-305
+src/lib.rs
+  h_20fc4d483d1064 6,11,16
+src/linux/params.rs
+  h_20fc4d483d1064 1,13
+tests/tun_test.rs
+  h_20fc4d483d1064 2,58-59,70-73,75-78,84-194,231-232,272-273
+  s_5b9c3582411017::t_0692e96442ae8d 12-29
+Cargo.toml
+  h_20fc4d483d1064 13
+.github/workflows/build.yml
+  h_20fc4d483d1064 20-45
+README.md
+  h_20fc4d483d1064 12-14,22-23,63,65-95,98-111,138,143
+src/linux/address.rs
+  h_20fc4d483d1064 5-8,16,18-22
+src/linux/request.rs
+  h_20fc4d483d1064 65-69,81-83
+  s_5b9c3582411017::t_99b4bdc568ca87 94,97-98,101-107
+examples/read-mq.rs
+  h_20fc4d483d1064 1,14-16
+src/linux/io.rs
+  h_20fc4d483d1064 89
+src/linux/netlink.rs
+  h_20fc4d483d1064 1-697
+examples/read.rs
+  h_20fc4d483d1064 1,15-17
+examples/multiple-addresses.rs
+  h_20fc4d483d1064 1-42
+src/linux/interface.rs
+  h_20fc4d483d1064 4-6,8-9,12,14-22,24-32,34-42,46,52-58,66-99,101,104-106,111,121-136,138-139,146-166,173,175-180,187,189,194,196-198,201,203-205,210,213,220,227,231,233-234,240-260,267,274-294
+  h_20fc4d483d1064 13,23,33
+src/tun.rs
+  s_5b9c3582411017::t_8ce5936c2ca9c0 510-512
+  h_20fc4d483d1064 3-4,8-9,11,20-25,124-128,175-185,193-196,199-207,254,346-369,372-386,389-403,406,408,411,413,431-434,437-449,483-505,513-521
+  s_5b9c3582411017::t_9c15566164cc98 129-131
+  s_5b9c3582411017::t_2d9c6f0ecd392f 132-137,140-145,150-163,166-171,453,509
+  s_5b9c3582411017::t_3f2105f315fa69 456
+  s_5b9c3582411017::t_88b564d64f0976 450-452
+  s_5b9c3582411017::t_5dce44fc4f01b9 506-508
+  h_20fc4d483d1064 387-388
+src/builder.rs
+  h_20fc4d483d1064 2,8-11,23-24,40-41,54-57,78-79,127,129-154,158-159,161-164,166-191,195-199,201-209,252-253,255,261-295,319,329-476
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f0b51e428bccdc04fa6cae21823e73078996dba1",
+  "prompts": {},
+  "humans": {
+    "h_20fc4d483d1064": {
+      "author": "Navid <3187511+yaa110@users.noreply.github.com>"
+    }
+  },
+  "sessions": {
+    "s_5b9c3582411017": {
+      "agent_id": {
+        "tool": "gemini",
+        "id": "34e9a404-c404-4818-83c3-c59be4f59de7",
+        "model": "gemini-3.8-flash"
+      },
+      "human_author": null
+    }
+  }
+}
