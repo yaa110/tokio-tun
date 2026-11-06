@@ -49,7 +49,13 @@ pub struct Interface {
 }
 
 impl Interface {
-    pub fn new(fds: Vec<i32>, name: &str, mut flags: i16, cloexec: bool) -> Result<Self> {
+    pub fn new(
+        fds: Vec<i32>,
+        name: &str,
+        mut flags: i16,
+        multi_queue: bool,
+        cloexec: bool,
+    ) -> Result<Self> {
         if name.len() > MAX_INTERFACE_NAME_LEN || name.contains('\0') {
             close_fds(&fds);
             return Err(
@@ -60,7 +66,7 @@ impl Interface {
         let is_tap = (flags & (libc::IFF_TAP as i16)) != 0;
         let extra_flags = if cloexec { libc::O_CLOEXEC } else { 0 };
         let mut req = ifreq::new(name);
-        if fds.len() > 1 {
+        if multi_queue {
             flags |= libc::IFF_MULTI_QUEUE as i16;
         }
         req.ifr_ifru.ifru_flags = flags;
@@ -329,13 +335,13 @@ mod tests {
 
     #[test]
     fn index_resolves_loopback() {
-        let interface = Interface::new(Vec::new(), "lo", 0, false).unwrap();
+        let interface = Interface::new(Vec::new(), "lo", 0, false, false).unwrap();
         assert!(interface.index().unwrap() > 0);
     }
 
     #[test]
     fn addresses_reads_loopback() {
-        let interface = Interface::new(Vec::new(), "lo", 0, false).unwrap();
+        let interface = Interface::new(Vec::new(), "lo", 0, false, false).unwrap();
         let addresses = interface.addresses().unwrap();
         assert!(addresses.iter().any(|info| info.address.is_ipv4()));
         // IPv6 can be disabled in some environments.
@@ -350,7 +356,7 @@ mod tests {
 
     #[test]
     fn rejects_invalid_interface_names() {
-        assert!(Interface::new(Vec::new(), "abcdefghijklmnop", 0, false).is_err());
-        assert!(Interface::new(Vec::new(), "tun0\0evil", 0, false).is_err());
+        assert!(Interface::new(Vec::new(), "abcdefghijklmnop", 0, false, false).is_err());
+        assert!(Interface::new(Vec::new(), "tun0\0evil", 0, false, false).is_err());
     }
 }

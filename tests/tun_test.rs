@@ -311,6 +311,41 @@ async fn test_multi_queue() {
 }
 
 #[tokio::test]
+async fn test_multi_queue_single_queue() {
+    let tuns = skip_without_cap_net_admin!(Tun::builder().name("tunmq1q0").queues(1).up().build());
+
+    assert_eq!(tuns.len(), 1);
+    assert_eq!(tuns[0].name(), "tunmq1q0");
+
+    let fd = tuns[0].as_raw_fd();
+    let queue: tokio_tun::TunQueue = tuns.into_iter().next().unwrap().into();
+    assert_eq!(queue.as_raw_fd(), fd);
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    assert!(flags >= 0);
+    assert_ne!(flags & libc::O_NONBLOCK, 0);
+
+    // Attaching a second queue proves the interface was opened with
+    // IFF_MULTI_QUEUE even though only one queue was requested.
+    let second = skip_without_cap_net_admin!(Tun::builder().name("tunmq1q0").queues(1).build());
+    assert_eq!(second.len(), 1);
+    assert_ne!(second[0].as_raw_fd(), fd);
+}
+
+#[tokio::test]
+async fn test_single_queue_rejects_multi_queue_attach() {
+    let tuns = skip_without_cap_net_admin!(Tun::builder().name("tunsq0").up().build());
+    assert_eq!(tuns.len(), 1);
+
+    let err = match Tun::builder().name("tunsq0").queues(1).build() {
+        Ok(_) => panic!("single-queue device accepted a multi-queue attach"),
+        Err(err) => err,
+    };
+    let tokio_tun::Error::IoError(err) = err;
+    assert_eq!(err.raw_os_error(), Some(libc::EINVAL));
+    drop(tuns);
+}
+
+#[tokio::test]
 async fn test_packet_info() {
     let tun = skip_without_cap_net_admin!(
         Tun::builder()

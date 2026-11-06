@@ -6,7 +6,7 @@ use std::os::fd::AsRawFd;
 use std::time::{Duration as StdDuration, Instant};
 use tokio::net::UdpSocket;
 use tokio::time::{Duration, timeout};
-use tokio_tun::Tun;
+use tokio_tun::{Tun, TunQueue};
 
 macro_rules! require_root {
     () => {
@@ -36,6 +36,26 @@ async fn test_macos_utun_device() {
     assert!(tun.index().unwrap() > 0);
     assert_eq!(tun.mtu().unwrap(), 1400);
     assert!(tun.as_raw_fd() > 0);
+}
+
+#[tokio::test]
+async fn test_macos_utun_queue_conversion() {
+    require_root!();
+
+    let tun = Tun::builder().name("").up().build().unwrap().pop().unwrap();
+    let fd = tun.as_raw_fd();
+    let name = tun.name().to_owned();
+    let index = tun.index().unwrap();
+
+    let queue: TunQueue = tun.into();
+    assert_eq!(queue.as_raw_fd(), fd);
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    assert!(flags >= 0);
+    assert_ne!(flags & libc::O_NONBLOCK, 0);
+
+    // The interface metadata is intentionally unavailable after conversion.
+    assert!(name.starts_with("utun"));
+    assert!(index > 0);
 }
 
 #[tokio::test]

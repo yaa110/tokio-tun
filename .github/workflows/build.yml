@@ -17,6 +17,7 @@ jobs:
       - run: cargo fmt -- --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo build
+      - run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
   macos:
     runs-on: macos-latest
     timeout-minutes: 30
@@ -31,6 +32,8 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo build
       - name: check macOS API surface
+        env:
+          RUSTDOCFLAGS: -D warnings
         run: |
           cargo doc --no-deps
           for method in tap packet_info queues persist owner group mac_address broadcast; do

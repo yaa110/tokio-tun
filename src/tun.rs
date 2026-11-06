@@ -15,7 +15,7 @@ use crate::macos::io::TunIo;
 use crate::macos::params::Params;
 use std::io::{self, ErrorKind, IoSlice, Read, Write};
 use std::net::{IpAddr, Ipv4Addr};
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 #[cfg(target_os = "linux")]
 use std::os::raw::c_char;
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
@@ -46,14 +46,24 @@ macro_rules! ready {
 }
 
 /// Represents a Tun/Tap device. Use [`TunBuilder`](struct.TunBuilder.html) to create a new instance of [`Tun`](struct.Tun.html).
+///
+/// Convert a `Tun` into a [`TunQueue`] to pass the underlying descriptor to
+/// another process. The conversion discards the interface accessors, so read
+/// any interface metadata you need first.
 pub struct Tun {
     iface: Arc<Interface>,
-    io: AsyncFd<TunIo>,
+    io: TunQueue,
 }
 
 impl AsRawFd for Tun {
     fn as_raw_fd(&self) -> RawFd {
         self.io.as_raw_fd()
+    }
+}
+
+impl AsFd for Tun {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.io.as_fd()
     }
 }
 
@@ -63,19 +73,7 @@ impl AsyncRead for Tun {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> task::Poll<io::Result<()>> {
-        let self_mut = self.get_mut();
-        loop {
-            let mut guard = ready!(self_mut.io.poll_read_ready_mut(cx))?;
-
-            match guard.try_io(|inner| inner.get_mut().read(buf.initialize_unfilled())) {
-                Ok(Ok(n)) => {
-                    buf.set_filled(buf.filled().len() + n);
-                    return Poll::Ready(Ok(()));
-                }
-                Ok(Err(err)) => return Poll::Ready(Err(err)),
-                Err(_) => continue,
-            }
-        }
+        Pin::new(&mut self.get_mut().io).poll_read(cx, buf)
     }
 }
 
@@ -85,15 +83,7 @@ impl AsyncWrite for Tun {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> task::Poll<io::Result<usize>> {
-        let self_mut = self.get_mut();
-        loop {
-            let mut guard = ready!(self_mut.io.poll_write_ready_mut(cx))?;
-
-            match guard.try_io(|inner| inner.get_mut().write(buf)) {
-                Ok(result) => return Poll::Ready(result),
-                Err(_would_block) => continue,
-            }
-        }
+        Pin::new(&mut self.get_mut().io).poll_write(cx, buf)
     }
 
     fn poll_write_vectored(
@@ -101,28 +91,19 @@ impl AsyncWrite for Tun {
         cx: &mut Context<'_>,
         bufs: &[IoSlice<'_>],
     ) -> Poll<std::result::Result<usize, io::Error>> {
-        let self_mut = self.get_mut();
-        loop {
-            let mut guard = ready!(self_mut.io.poll_write_ready_mut(cx))?;
-
-            match guard.try_io(|inner| inner.get_mut().write_vectored(bufs)) {
-                Ok(result) => return Poll::Ready(result),
-                Err(_would_block) => continue,
-            }
-        }
+        Pin::new(&mut self.get_mut().io).poll_write_vectored(cx, bufs)
     }
 
     fn is_write_vectored(&self) -> bool {
         true
     }
 
-    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> task::Poll<io::Result<()>> {
-        // TunIo is unbuffered, so flushing must not wait for write readiness.
-        Poll::Ready(self.get_mut().io.get_mut().flush())
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> task::Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().io).poll_flush(cx)
     }
 
-    fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> task::Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> task::Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().io).poll_shutdown(cx)
     }
 }
 
@@ -135,23 +116,26 @@ impl Tun {
     pub(crate) fn new(params: Params) -> Result<Self> {
         #[cfg(target_os = "linux")]
         let persist = params.persist;
-        let mut iface = Self::allocate(params, 1)?;
+        let mut iface = Self::allocate(params, None)?;
         let mut fds: Vec<OwnedFd> = iface
             .take_files()
             .into_iter()
-            .map(|fd| unsafe { OwnedFd::from_raw_fd(fd) })
+            .map(|fd| {
+                // SAFETY: `take_files` transfers ownership of each descriptor.
+                unsafe { OwnedFd::from_raw_fd(fd) }
+            })
             .collect();
-        let fd = fds.pop().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "expected exactly one file descriptor",
-            )
-        })?;
-        // SAFETY: `fd` is an open and valid file descriptor whose ownership is
-        // transferred to `TunIo`, and it remains valid for the lifetime of
-        // `AsyncFd`.
-        let io = unsafe { AsyncFd::register(TunIo::from_raw_fd(fd.into_raw_fd())) }
-            .map_err(io::Error::from)?;
+        let fd = match fds.pop() {
+            Some(fd) if fds.is_empty() => fd,
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "expected exactly one file descriptor",
+                )
+                .into());
+            }
+        };
+        let io = TunQueue::new(fd)?;
         let tun = Self {
             iface: Arc::new(iface),
             io,
@@ -176,20 +160,19 @@ impl Tun {
         }
         #[cfg(target_os = "linux")]
         let persist = params.persist;
-        let mut iface = Self::allocate(params, queues)?;
+        let mut iface = Self::allocate(params, Some(queues))?;
         let fds: Vec<OwnedFd> = iface
             .take_files()
             .into_iter()
-            .map(|fd| unsafe { OwnedFd::from_raw_fd(fd) })
+            .map(|fd| {
+                // SAFETY: `take_files` transfers ownership of each descriptor.
+                unsafe { OwnedFd::from_raw_fd(fd) }
+            })
             .collect();
         let mut tuns = Vec::with_capacity(queues);
         let iface = Arc::new(iface);
         for fd in fds {
-            // SAFETY: `fd` is an open and valid file descriptor whose ownership
-            // is transferred to `TunIo`, and it remains valid for the lifetime
-            // of `AsyncFd`.
-            let io = unsafe { AsyncFd::register(TunIo::from_raw_fd(fd.into_raw_fd())) }
-                .map_err(io::Error::from)?;
+            let io = TunQueue::new(fd)?;
             tuns.push(Self {
                 iface: iface.clone(),
                 io,
@@ -210,11 +193,13 @@ impl Tun {
     }
 
     #[cfg(target_os = "linux")]
-    fn allocate(params: Params, queues: usize) -> Result<Interface> {
+    fn allocate(params: Params, queues: Option<usize>) -> Result<Interface> {
         let extra_flags = if params.cloexec { libc::O_CLOEXEC } else { 0 };
+        let count = queues.unwrap_or(1);
+        let multi_queue = queues.is_some();
 
-        let mut fds = Vec::with_capacity(queues);
-        for _ in 0..queues {
+        let mut fds = Vec::with_capacity(count);
+        for _ in 0..count {
             let fd = unsafe {
                 libc::open(
                     TUN.as_ptr().cast::<c_char>(),
@@ -233,6 +218,7 @@ impl Tun {
             fds,
             params.name.as_deref().unwrap_or_default(),
             params.flags,
+            multi_queue,
             params.cloexec,
         )?;
         iface.init(params)?;
@@ -240,8 +226,8 @@ impl Tun {
     }
 
     #[cfg(target_os = "macos")]
-    fn allocate(params: Params, queues: usize) -> Result<Interface> {
-        if queues != 1 {
+    fn allocate(params: Params, queues: Option<usize>) -> Result<Interface> {
+        if queues.is_some() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "multi-queue is not supported on macOS",
@@ -258,55 +244,28 @@ impl Tun {
     ///
     /// This method takes &self, so it is possible to call this method concurrently with other methods on this struct.
     pub async fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
-        loop {
-            let mut guard = self.io.readable().await?;
-            match guard.try_io(|inner| inner.get_ref().recv(buf)) {
-                Ok(res) => return res,
-                Err(_) => continue,
-            }
-        }
+        self.io.recv(buf).await
     }
 
     /// Sends a buffer to the Tun/Tap interface. Returns the number of bytes written to the device.
     ///
     /// This method takes &self, so it is possible to call this method concurrently with other methods on this struct.
     pub async fn send(&self, buf: &[u8]) -> io::Result<usize> {
-        loop {
-            let mut guard = self.io.writable().await?;
-            match guard.try_io(|inner| inner.get_ref().send(buf)) {
-                Ok(res) => return res,
-                Err(_) => continue,
-            }
-        }
+        self.io.send(buf).await
     }
 
     /// Sends all of a buffer to the Tun/Tap interface.
     ///
     /// This method takes &self, so it is possible to call this method concurrently with other methods on this struct.
     pub async fn send_all(&self, buf: &[u8]) -> io::Result<()> {
-        let mut remaining = buf;
-        while !remaining.is_empty() {
-            match self.send(remaining).await? {
-                0 => return Err(ErrorKind::WriteZero.into()),
-                n => {
-                    remaining = &remaining[n..];
-                }
-            }
-        }
-        Ok(())
+        self.io.send_all(buf).await
     }
 
     /// Sends vectored buffers to the Tun/Tap interface. Returns the number of bytes written to the device.
     ///
     /// This method takes &self, so it is possible to call this method concurrently with other methods on this struct.
     pub async fn sendv(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
-        loop {
-            let mut guard = self.io.writable().await?;
-            match guard.try_io(|inner| inner.get_ref().sendv(bufs)) {
-                Ok(res) => return res,
-                Err(_) => continue,
-            }
-        }
+        self.io.sendv(bufs).await
     }
 
     /// Attempts to write an entire vectored buffer to this writer.
@@ -321,21 +280,7 @@ impl Tun {
     ///
     /// This function will return the first error that `sendv` returns.
     pub async fn sendv_all(&self, bufs: &mut [IoSlice<'_>]) -> io::Result<()> {
-        let mut bufs = bufs;
-        while !bufs.is_empty() {
-            match self.sendv(bufs).await? {
-                0 => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::WriteZero,
-                        "failed to write whole buffer",
-                    ));
-                }
-                n => {
-                    IoSlice::advance_slices(&mut bufs, n);
-                }
-            }
-        }
-        Ok(())
+        self.io.sendv_all(bufs).await
     }
 
     /// Tries to receive a buffer from the Tun/Tap interface.
@@ -344,7 +289,7 @@ impl Tun {
     ///
     /// This method takes &self, so it is possible to call this method concurrently with other methods on this struct.
     pub fn try_recv(&self, buf: &mut [u8]) -> io::Result<usize> {
-        self.io.get_ref().recv(buf)
+        self.io.try_recv(buf)
     }
 
     /// Tries to send a packet to the Tun/Tap interface.
@@ -353,7 +298,7 @@ impl Tun {
     ///
     /// This method takes &self, so it is possible to call this method concurrently with other methods on this struct.
     pub fn try_send(&self, buf: &[u8]) -> io::Result<usize> {
-        self.io.get_ref().send(buf)
+        self.io.try_send(buf)
     }
 
     /// Tries to send several different buffers to the Tun/Tap interface.
@@ -362,7 +307,7 @@ impl Tun {
     ///
     /// This method takes &self, so it is possible to call this method concurrently with other methods on this struct.
     pub fn try_sendv(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
-        self.io.get_ref().sendv(bufs)
+        self.io.try_sendv(bufs)
     }
 
     /// Returns the name of Tun/Tap device.
@@ -480,10 +425,371 @@ impl Tun {
     }
 }
 
+/// Represents one queue/file descriptor of a Tun/Tap device.
+///
+/// A `TunQueue` can wrap an owned TUN/TAP queue descriptor (on macOS, a
+/// `utun` descriptor), which allows it to be passed to another process and
+/// used with tokio-tun there.
+///
+/// ```no_run
+/// use std::os::fd::OwnedFd;
+/// use tokio_tun::TunQueue;
+///
+/// # fn example(fd: OwnedFd) -> std::io::Result<()> {
+/// let queue = TunQueue::new(fd)?;
+/// # Ok(())
+/// # }
+/// ```
+pub struct TunQueue(AsyncFd<TunIo>);
+
+impl TunQueue {
+    /// Wraps an owned TUN/TAP queue descriptor and sets it to non-blocking mode.
+    ///
+    /// `O_NONBLOCK` is shared by all descriptors that refer to the same open
+    /// file description, so wrapping a descriptor received from another
+    /// process can also make that process's descriptor non-blocking.
+    /// `FD_CLOEXEC` is left unchanged. The descriptor is closed if wrapping
+    /// fails.
+    ///
+    /// # Panics
+    ///
+    /// This method must be called from within a Tokio runtime with I/O
+    /// enabled; otherwise Tokio panics during registration.
+    pub fn new<T: Into<OwnedFd>>(io: T) -> io::Result<Self> {
+        let fd = io.into();
+        set_nonblocking(fd.as_raw_fd())?;
+        // SAFETY: ownership is transferred to `TunIo`.
+        let io = unsafe { TunIo::from_raw_fd(fd.into_raw_fd()) };
+        // SAFETY: `io` is valid and non-blocking for the lifetime of `AsyncFd`.
+        let io = unsafe { AsyncFd::register(io) }.map_err(io::Error::from)?;
+        Ok(Self(io))
+    }
+
+    /// Wraps a raw TUN/TAP queue descriptor, taking ownership of it.
+    ///
+    /// The descriptor is set to non-blocking mode and closed if wrapping
+    /// fails. See [`TunQueue::new`] for the shared `O_NONBLOCK` caveat.
+    ///
+    /// # Safety
+    ///
+    /// The caller must own `fd` and transfer that ownership to the returned
+    /// `TunQueue`. The descriptor must remain open and valid.
+    ///
+    /// # Panics
+    ///
+    /// This method must be called from within a Tokio runtime with I/O
+    /// enabled; otherwise Tokio panics during registration.
+    pub unsafe fn from_raw_fd(fd: RawFd) -> io::Result<Self> {
+        // SAFETY: the caller guarantees ownership of `fd`.
+        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        Self::new(fd)
+    }
+
+    /// Receives a packet from the queue.
+    pub async fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
+        loop {
+            let mut guard = self.0.readable().await?;
+            match guard.try_io(|inner| inner.get_ref().recv(buf)) {
+                Ok(res) => return res,
+                Err(_) => continue,
+            }
+        }
+    }
+
+    /// Sends a packet to the queue.
+    pub async fn send(&self, buf: &[u8]) -> io::Result<usize> {
+        loop {
+            let mut guard = self.0.writable().await?;
+            match guard.try_io(|inner| inner.get_ref().send(buf)) {
+                Ok(res) => return res,
+                Err(_) => continue,
+            }
+        }
+    }
+
+    /// Sends all bytes in `buf` to the queue.
+    pub async fn send_all(&self, buf: &[u8]) -> io::Result<()> {
+        let mut remaining = buf;
+        while !remaining.is_empty() {
+            match self.send(remaining).await? {
+                0 => return Err(ErrorKind::WriteZero.into()),
+                n => remaining = &remaining[n..],
+            }
+        }
+        Ok(())
+    }
+
+    /// Sends vectored buffers to the queue.
+    pub async fn sendv(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
+        loop {
+            let mut guard = self.0.writable().await?;
+            match guard.try_io(|inner| inner.get_ref().sendv(bufs)) {
+                Ok(res) => return res,
+                Err(_) => continue,
+            }
+        }
+    }
+
+    /// Sends all vectored buffers to the queue.
+    ///
+    /// This method advances the buffers in place as data is written.
+    pub async fn sendv_all(&self, bufs: &mut [IoSlice<'_>]) -> io::Result<()> {
+        if bufs.iter().all(|buf| buf.is_empty()) {
+            return Ok(());
+        }
+
+        let mut bufs = bufs;
+        while !bufs.is_empty() {
+            match self.sendv(bufs).await? {
+                0 => {
+                    return Err(io::Error::new(
+                        ErrorKind::WriteZero,
+                        "failed to write whole buffer",
+                    ));
+                }
+                n => IoSlice::advance_slices(&mut bufs, n),
+            }
+        }
+        Ok(())
+    }
+
+    /// Tries to receive a packet without waiting.
+    pub fn try_recv(&self, buf: &mut [u8]) -> io::Result<usize> {
+        self.0.get_ref().recv(buf)
+    }
+
+    /// Tries to send a packet without waiting.
+    pub fn try_send(&self, buf: &[u8]) -> io::Result<usize> {
+        self.0.get_ref().send(buf)
+    }
+
+    /// Tries to send vectored buffers without waiting.
+    pub fn try_sendv(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
+        self.0.get_ref().sendv(bufs)
+    }
+}
+
+impl AsRawFd for TunQueue {
+    fn as_raw_fd(&self) -> RawFd {
+        self.0.as_raw_fd()
+    }
+}
+
+impl AsFd for TunQueue {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.0.as_fd()
+    }
+}
+
+impl IntoRawFd for TunQueue {
+    fn into_raw_fd(self) -> RawFd {
+        self.0.into_inner().into_raw_fd()
+    }
+}
+
+impl From<TunQueue> for OwnedFd {
+    fn from(queue: TunQueue) -> Self {
+        let raw = queue.into_raw_fd();
+        // SAFETY: `queue` owned the descriptor and `into_raw_fd` transferred
+        // ownership to us.
+        unsafe { OwnedFd::from_raw_fd(raw) }
+    }
+}
+
+impl From<Tun> for TunQueue {
+    fn from(tun: Tun) -> Self {
+        tun.io
+    }
+}
+
+impl AsyncRead for TunQueue {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> task::Poll<io::Result<()>> {
+        let self_mut = self.get_mut();
+        loop {
+            let mut guard = ready!(self_mut.0.poll_read_ready_mut(cx))?;
+            match guard.try_io(|inner| inner.get_mut().read(buf.initialize_unfilled())) {
+                Ok(Ok(n)) => {
+                    buf.set_filled(buf.filled().len() + n);
+                    return Poll::Ready(Ok(()));
+                }
+                Ok(Err(err)) => return Poll::Ready(Err(err)),
+                Err(_) => continue,
+            }
+        }
+    }
+}
+
+impl AsyncWrite for TunQueue {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> task::Poll<io::Result<usize>> {
+        let self_mut = self.get_mut();
+        loop {
+            let mut guard = ready!(self_mut.0.poll_write_ready_mut(cx))?;
+            match guard.try_io(|inner| inner.get_mut().write(buf)) {
+                Ok(result) => return Poll::Ready(result),
+                Err(_) => continue,
+            }
+        }
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<std::result::Result<usize, io::Error>> {
+        let self_mut = self.get_mut();
+        loop {
+            let mut guard = ready!(self_mut.0.poll_write_ready_mut(cx))?;
+            match guard.try_io(|inner| inner.get_mut().write_vectored(bufs)) {
+                Ok(result) => return Poll::Ready(result),
+                Err(_) => continue,
+            }
+        }
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        true
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> task::Poll<io::Result<()>> {
+        Poll::Ready(self.get_mut().0.get_mut().flush())
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> task::Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+fn set_nonblocking(fd: RawFd) -> io::Result<()> {
+    // SAFETY: `fd` is an open descriptor owned by the caller.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `fd` is an open descriptor and `flags` came from F_GETFL.
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod queue_tests {
+    use super::*;
+    use std::os::fd::{FromRawFd, OwnedFd};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn socket_pair() -> (OwnedFd, OwnedFd) {
+        let mut fds = [0i32; 2];
+        let result =
+            unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_DGRAM, 0, fds.as_mut_ptr()) };
+        assert_eq!(
+            result,
+            0,
+            "socketpair failed: {}",
+            io::Error::last_os_error()
+        );
+        // SAFETY: `socketpair` returned two valid, owned descriptors.
+        let left = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+        // SAFETY: `socketpair` returned two valid, owned descriptors.
+        let right = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+        (left, right)
+    }
+
+    #[tokio::test]
+    async fn wraps_existing_fds() {
+        let (left, right) = socket_pair();
+        let left = TunQueue::new(left).unwrap();
+        let right = TunQueue::new(right).unwrap();
+        let packet = [0x45u8; 20];
+
+        left.send(&packet).await.unwrap();
+        let mut buffer = [0u8; 32];
+        let received = right.recv(&mut buffer).await.unwrap();
+        assert_eq!(&buffer[..received], &packet);
+    }
+
+    #[tokio::test]
+    async fn queue_async_read_write() {
+        let (left, right) = socket_pair();
+        let mut left = TunQueue::new(left).unwrap();
+        let mut right = TunQueue::new(right).unwrap();
+        let packet = [0x45u8; 20];
+
+        left.write_all(&packet).await.unwrap();
+        let mut buffer = [0u8; 32];
+        right.read_exact(&mut buffer[..packet.len()]).await.unwrap();
+        assert_eq!(&buffer[..packet.len()], &packet);
+    }
+
+    #[tokio::test]
+    async fn sendv_all_accepts_empty_buffers() {
+        let (left, right) = socket_pair();
+        let left = TunQueue::new(left).unwrap();
+        let _right = TunQueue::new(right).unwrap();
+        let mut buffers = [IoSlice::new(&[]), IoSlice::new(&[])];
+
+        left.sendv_all(&mut buffers).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn sendv_all_handles_mixed_empty_buffers() {
+        let (left, right) = socket_pair();
+        let left = TunQueue::new(left).unwrap();
+        let right = TunQueue::new(right).unwrap();
+        let packet = [0x45u8; 20];
+        let mut buffers = [IoSlice::new(&[]), IoSlice::new(&packet), IoSlice::new(&[])];
+
+        left.sendv_all(&mut buffers).await.unwrap();
+        let mut buffer = [0u8; 32];
+        let received = right.recv(&mut buffer).await.unwrap();
+        assert_eq!(&buffer[..received], &packet);
+    }
+
+    #[tokio::test]
+    async fn transfers_ownership_through_owned_fd() {
+        let (left, right) = socket_pair();
+        let left = TunQueue::new(left).unwrap();
+        let right = TunQueue::new(right).unwrap();
+
+        let fd: OwnedFd = left.into();
+        let left = TunQueue::new(fd).unwrap();
+        let packet = [0x45u8; 20];
+        left.send(&packet).await.unwrap();
+
+        let mut buffer = [0u8; 32];
+        let received = right.recv(&mut buffer).await.unwrap();
+        assert_eq!(&buffer[..received], &packet);
+    }
+
+    #[tokio::test]
+    async fn transfers_ownership_through_raw_fd() {
+        let (left, right) = socket_pair();
+        let left = TunQueue::new(left).unwrap();
+        let right = TunQueue::new(right).unwrap();
+
+        let raw = left.into_raw_fd();
+        // SAFETY: ownership of `raw` was transferred to us by `into_raw_fd`.
+        let left = unsafe { TunQueue::from_raw_fd(raw) }.unwrap();
+        let packet = [0x60u8; 40];
+        left.send(&packet).await.unwrap();
+
+        let mut buffer = [0u8; 64];
+        let received = right.recv(&mut buffer).await.unwrap();
+        assert_eq!(&buffer[..received], &packet);
+    }
+}
+
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
-    use std::os::fd::IntoRawFd;
     use std::os::unix::net::UnixStream;
     use tokio::io::AsyncWriteExt;
     use tokio::time::{Duration, timeout};
@@ -512,12 +818,10 @@ mod tests {
                 std::io::Error::last_os_error()
             );
         }
-        // SAFETY: `writer` is a valid open file descriptor that is converted into
-        // a raw fd and owned by `TunIo` for the lifetime of `AsyncFd`.
-        let io = unsafe { AsyncFd::register(TunIo::from_raw_fd(writer.into_raw_fd())) }.unwrap();
+        let io = TunQueue::new(writer).unwrap();
         // No TUN device is configured by this fixture. The empty interface is
         // only metadata; I/O uses a non-fsyncable socket pair.
-        let iface = Arc::new(Interface::new(Vec::new(), "", 0, false).unwrap());
+        let iface = Arc::new(Interface::new(Vec::new(), "", 0, false, false).unwrap());
         (Tun { iface, io }, reader)
     }
 
