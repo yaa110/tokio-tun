@@ -1,5 +1,7 @@
+#[cfg(target_os = "freebsd")]
+use crate::freebsd::io::TunIo;
 #[cfg(target_os = "macos")]
-use crate::macos::io::TunIo;
+use crate::header_io::TunIo;
 #[cfg(any(target_os = "linux", target_os = "android", target_os = "ios"))]
 use crate::raw_io::TunIo;
 use std::io::{self, ErrorKind, IoSlice, Read, Write};
@@ -26,12 +28,15 @@ macro_rules! ready {
 /// descriptor is used as-is (including packet information when enabled). On
 /// Android and iOS the descriptor must carry raw IP packets. On macOS it is a
 /// `utun` descriptor, and the four-byte `utun` header is handled automatically.
+/// On FreeBSD, `Tun` uses a four-byte address-family header for TUN devices.
+/// `TunQueue::new` detects `TUNSIFHEAD` automatically. FreeBSD TAP descriptors
+/// carry raw Ethernet frames.
 ///
 /// For packet-oriented descriptors, use [`recv`](TunQueue::recv),
 /// [`send`](TunQueue::send), or [`sendv`](TunQueue::sendv) to preserve packet
 /// boundaries. Receive buffers should be at least as large as the interface
-/// MTU; `recv` may silently truncate a larger packet on Linux, Android, and
-/// iOS.
+/// MTU; `recv` may silently truncate a larger packet on Linux, Android, iOS,
+/// and FreeBSD.
 ///
 /// ```no_run
 /// use std::os::fd::OwnedFd;
@@ -61,9 +66,24 @@ impl TunQueue {
     pub fn new<T: Into<OwnedFd>>(io: T) -> io::Result<Self> {
         let fd = io.into();
         set_nonblocking(fd.as_raw_fd())?;
+        #[cfg(target_os = "freebsd")]
+        let io = {
+            let header = crate::freebsd::io::header_enabled(fd.as_raw_fd());
+            TunIo::new(fd, header)
+        };
+        #[cfg(not(target_os = "freebsd"))]
         // SAFETY: ownership is transferred to `TunIo`.
         let io = unsafe { TunIo::from_raw_fd(fd.into_raw_fd()) };
         // SAFETY: `io` is valid and non-blocking for the lifetime of `AsyncFd`.
+        let io = unsafe { AsyncFd::register(io) }.map_err(io::Error::from)?;
+        Ok(Self(io))
+    }
+
+    #[cfg(target_os = "freebsd")]
+    pub(crate) fn from_freebsd_io(io: TunIo) -> io::Result<Self> {
+        set_nonblocking(io.as_raw_fd())?;
+        // SAFETY: `io` owns a valid descriptor and remains open for the
+        // lifetime of the `AsyncFd`.
         let io = unsafe { AsyncFd::register(io) }.map_err(io::Error::from)?;
         Ok(Self(io))
     }

@@ -72,6 +72,26 @@ jobs:
             "CARGO_TARGET_DIR=$CARGO_TARGET_DIR" \
             "TOKIO_TUN_REQUIRE_PRIVILEGED=$TOKIO_TUN_REQUIRE_PRIVILEGED" \
             cargo test --test macos_test
+  freebsd:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          components: clippy
+          target: x86_64-unknown-freebsd
+      - run: cargo check --target x86_64-unknown-freebsd --all-targets
+      - run: cargo clippy --target x86_64-unknown-freebsd --all-targets -- -D warnings
+      - run: RUSTDOCFLAGS="-D warnings" cargo doc --target x86_64-unknown-freebsd --no-deps
+      - name: run tests in FreeBSD VM
+        uses: vmactions/freebsd-vm@v1
+        with:
+          prepare: pkg install -y rust
+          run: |
+            kldload if_tuntap 2>/dev/null || kldload if_tun 2>/dev/null || true
+            kldload if_tap 2>/dev/null || true
+            TOKIO_TUN_REQUIRE_PRIVILEGED=1 cargo test
   integration:
     runs-on: ubuntu-latest
     timeout-minutes: 30

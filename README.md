@@ -44,15 +44,6 @@ async fn main() {
 }
 ```
 
-Packets written back to a TUN device must be valid IPv4/IPv6 packets. Use
-`Tun::send`, `Tun::sendv`, or `Tun::send_all` with an IP packet payload.
-
-- Run one of the included examples using `sudo`:
-
-```bash
-sudo -E $(which cargo) run --example read
-```
-
 ### Multiple addresses and IPv6
 
 `TunBuilder::address` accepts `std::net::IpAddr` and can be called multiple
@@ -60,59 +51,16 @@ times. Every call carries its own prefix length, so IPv4 and IPv6 addresses are
 independent. `destination` configures the point-to-point peer of the most
 recently added address. On Linux, `broadcast` also applies to the most recently
 added address and is available for IPv4 only, because IPv6 has no broadcast
-address. On macOS, IPv6 destinations require a `/128` prefix.
+address. On macOS and FreeBSD, TUN IPv6 destinations require a `/128` prefix.
+FreeBSD TAP devices do not support destinations.
 
-```rust
-use tokio_tun::Tun;
+Packets written back to a TUN device must be valid IPv4/IPv6 packets. Use
+`Tun::send`, `Tun::sendv`, or `Tun::send_all` with an IP packet payload.
 
-let tun = Tun::builder()
-    .name("")
-    // Two IPv4 addresses with independent prefixes.
-    .address("10.0.0.1".parse().unwrap(), 24)
-    .destination("10.0.0.2".parse().unwrap())
-    .address("10.0.1.1".parse().unwrap(), 24)
-    // Two IPv6 addresses with independent prefixes.
-    .address("fd00::1".parse().unwrap(), 64)
-    .address("fd00:0:0:1::1".parse().unwrap(), 64)
-    .up()
-    .build()
-    .unwrap()
-    .pop()
-    .unwrap();
-
-for address in tun.addresses().unwrap() {
-    println!(
-        "address: {}, prefix: {}, destination: {:?}, broadcast: {:?}",
-        address.address, address.prefix_len, address.destination, address.broadcast
-    );
-}
-```
-
-Example output (the kernel also adds a link-local IPv6 address, and ordering may vary):
-
-```text
-address: 10.0.0.1, prefix: 24, destination: Some(10.0.0.2), broadcast: None
-address: 10.0.1.1, prefix: 24, destination: None, broadcast: None
-address: fd00:0:0:1::1, prefix: 64, destination: None, broadcast: None
-address: fd00::1, prefix: 64, destination: None, broadcast: None
-address: fe80::3545:93f1:f538:3dd1, prefix: 64, destination: None, broadcast: None
-```
-
-The builder-level `netmask` method has been replaced by the prefix length passed
-to `address`. `Tun::netmask()` still returns the netmask of the primary IPv4
-address.
-
-- Ping to read packets:
+- Run one of the included examples using `sudo`:
 
 ```bash
-ping 10.0.0.2
-```
-
-- Display devices and analyze the network traffic (Linux):
-
-```bash
-ip tuntap
-sudo tshark -i <tun-name>
+sudo -E $(which cargo) run --example read
 ```
 
 ### MAC address (Linux TAP only)
@@ -166,7 +114,8 @@ file description, a descriptor received from another process also becomes
 non-blocking there. `FD_CLOEXEC` is left unchanged. On Linux, `TunQueue` uses
 the descriptor as-is, including packet information when enabled. Android and
 iOS bridges must provide raw IP packets. On macOS, `TunQueue` handles the
-`utun` header.
+`utun` header. On FreeBSD, it detects `TUNSIFHEAD` and handles TUN family
+headers automatically; TAP descriptors carry raw Ethernet frames.
 
 ### Multi-queue with one queue (Linux only)
 
@@ -182,7 +131,7 @@ configuration when attaching an additional queue.
 | macOS | ✅ | ❌ | ❌ | `utun`; TUN only |
 | Android | ✅ | ❌ | ❌ | `TunQueue` only; `VpnService` fd |
 | iOS | ✅ | ❌ | ❌ | `TunQueue` only; NetworkExtension bridge |
-| FreeBSD | ❌ | ❌ | ❌ | Not supported |
+| FreeBSD | ✅ | ✅ | ❌ | `/dev/tun` and `/dev/tap`; TUN uses BSD address-family headers internally |
 
 Mobile support is I/O-only: it wraps an externally supplied packet descriptor
 and does not allocate devices or integrate with `VpnService` /
@@ -196,9 +145,26 @@ macOS uses the built-in `utun` driver. Only layer-3 TUN is available:
 - IPv4/IPv6 addresses, MTU, flags, and async I/O are supported.
 - IPv4 destinations are supported. IPv6 destinations require a `/128` prefix.
 - macOS does not report IPv6 point-to-point destinations through `getifaddrs`, so `Tun::destination()` may return `AddrNotAvailable` for IPv6-only setups.
-- TAP, `packet_info`, multi-queue, persist, owner/group, MAC address, and broadcast APIs are Linux-only and are not available on macOS.
+- TAP is available on Linux and FreeBSD, but not macOS. `packet_info`, multi-queue, persist, owner/group, MAC address, and broadcast APIs are Linux-only.
 - Packets larger than the receive buffer return an error on macOS instead of being truncated.
 - `utun` creation requires root privileges.
+
+### FreeBSD
+
+FreeBSD supports TUN and TAP devices through the standard `/dev/tunN` and
+`/dev/tapN` devices. Use an empty name, `tunN` for TUN, or `tapN` together with `.tap()` for TAP.
+
+- TUN and TAP are supported.
+- Linux multi-queue is not available.
+- TUN packets use FreeBSD's `TUNSIFHEAD` address-family header internally;
+  `Tun` and `TunQueue::new` handle it transparently.
+- TUN IPv4 addresses without an explicit destination use the local address as
+  the peer. TUN IPv6 destinations require `/128`; TAP destinations are rejected.
+- Devices created by the crate are transient and are destroyed when the last descriptor is closed. Attaching to an existing named `tunN`/`tapN` device does not change its lifetime.
+- FreeBSD TUN receive reports a truncated packet when the buffer is too small; raw TAP descriptors may silently truncate.
+- Creating and configuring devices requires root privileges.
+- `packet_info`, `persist`, owner/group, MAC address, and Linux broadcast APIs
+  are not available on FreeBSD.
 
 ### Android
 
