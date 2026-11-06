@@ -1,5 +1,7 @@
 use crate::Result;
 use crate::address::AddressConfig;
+#[cfg(target_os = "freebsd")]
+use crate::freebsd::params::Params;
 #[cfg(target_os = "linux")]
 use crate::linux::params::Params;
 #[cfg(target_os = "macos")]
@@ -18,7 +20,7 @@ const MAX_QUEUES: usize = 256;
 /// Represents a factory to build new instances of [`Tun`](struct.Tun.html).
 pub struct TunBuilder {
     name: String,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     is_tap: bool,
     #[cfg(target_os = "linux")]
     packet_info: bool,
@@ -47,7 +49,7 @@ impl Default for TunBuilder {
             owner: None,
             #[cfg(target_os = "linux")]
             group: None,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             is_tap: false,
             #[cfg(target_os = "linux")]
             persist: false,
@@ -78,6 +80,9 @@ impl TunBuilder {
     /// [`build`](TunBuilder::build) to return an error.
     ///
     /// On macOS, only an empty name, `utun`, and `utunN` are supported.
+    /// On FreeBSD, use an empty name, `tunN` for TUN, or `tapN` together with
+    /// `tap()` for TAP. A pre-existing named interface is attached to without
+    /// changing whether it is transient.
     pub fn name(mut self, name: &str) -> Self {
         self.name = name.into();
         self
@@ -90,7 +95,7 @@ impl TunBuilder {
     ///
     /// In contrast, *TUN* devices are layer 3 devices which means that IP packets are transmitted
     /// over it.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     pub fn tap(mut self) -> Self {
         self.is_tap = true;
         self
@@ -207,7 +212,8 @@ impl TunBuilder {
     /// [`address`](TunBuilder::address) before this method; otherwise
     /// [`build`](TunBuilder::build) returns an error.
     ///
-    /// On macOS, IPv6 destinations require a `/128` prefix.
+    /// On macOS and FreeBSD, TUN IPv6 destinations require a `/128` prefix.
+    /// FreeBSD TAP devices do not support destinations.
     ///
     /// ```no_run
     /// use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -301,7 +307,8 @@ impl TunBuilder {
     /// This method must be called from within a Tokio runtime with I/O enabled.
     ///
     /// On macOS, invalid interface names and IPv6 destinations without a
-    /// `/128` prefix return an error.
+    /// `/128` prefix return an error. On FreeBSD, names must be empty, `tunN`,
+    /// or `tapN`.
     pub fn build(self) -> Result<Vec<Tun>> {
         self.validate()?;
         #[cfg(target_os = "linux")]
@@ -314,6 +321,8 @@ impl TunBuilder {
     fn validate(&self) -> Result<()> {
         #[cfg(target_os = "macos")]
         self.validate_macos()?;
+        #[cfg(target_os = "freebsd")]
+        self.validate_freebsd()?;
 
         if let Some(reason) = self.invalid_reason {
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, reason).into());
@@ -364,6 +373,50 @@ impl TunBuilder {
         Ok(())
     }
 
+    #[cfg(target_os = "freebsd")]
+    fn validate_freebsd(&self) -> Result<()> {
+        if !self.name.is_empty() {
+            let prefix = if self.is_tap { "tap" } else { "tun" };
+            let suffix = self.name.strip_prefix(prefix).unwrap_or("");
+            if suffix.is_empty()
+                || (suffix.len() > 1 && suffix.starts_with('0'))
+                || !suffix.bytes().all(|byte| byte.is_ascii_digit())
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "FreeBSD interface names must be empty, tunN, or tapN",
+                )
+                .into());
+            }
+        }
+        if self.is_tap
+            && self
+                .addresses
+                .iter()
+                .any(|address| address.destination.is_some())
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "destination addresses are not supported for FreeBSD TAP devices",
+            )
+            .into());
+        }
+        if !self.is_tap
+            && self.addresses.iter().any(|address| {
+                address.address.is_ipv6()
+                    && address.destination.is_some()
+                    && address.prefix_len != 128
+            })
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "FreeBSD TUN requires IPv6 destinations to use a /128 prefix",
+            )
+            .into());
+        }
+        Ok(())
+    }
+
     #[cfg(target_os = "macos")]
     fn validate_macos(&self) -> Result<()> {
         if self
@@ -397,7 +450,7 @@ impl TunBuilder {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
 impl From<TunBuilder> for Params {
     #[cfg(target_os = "linux")]
     fn from(builder: TunBuilder) -> Self {
@@ -433,6 +486,22 @@ impl From<TunBuilder> for Params {
             } else {
                 Some(builder.name)
             },
+            up: builder.up,
+            mtu: builder.mtu,
+            addresses: builder.addresses,
+            cloexec: builder.cloexec,
+        }
+    }
+
+    #[cfg(target_os = "freebsd")]
+    fn from(builder: TunBuilder) -> Self {
+        Params {
+            name: if builder.name.is_empty() {
+                None
+            } else {
+                Some(builder.name)
+            },
+            tap: builder.is_tap,
             up: builder.up,
             mtu: builder.mtu,
             addresses: builder.addresses,

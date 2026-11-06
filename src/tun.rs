@@ -2,6 +2,12 @@ use crate::Result;
 use crate::TunBuilder;
 use crate::TunQueue;
 use crate::address::AddressInfo;
+#[cfg(target_os = "freebsd")]
+use crate::freebsd::interface::Interface;
+#[cfg(target_os = "freebsd")]
+use crate::freebsd::io::TunIo;
+#[cfg(target_os = "freebsd")]
+use crate::freebsd::params::Params;
 #[cfg(target_os = "linux")]
 use crate::linux::interface::{Interface, set_persist};
 #[cfg(target_os = "linux")]
@@ -121,6 +127,9 @@ impl Tun {
                 .into());
             }
         };
+        #[cfg(target_os = "freebsd")]
+        let io = TunQueue::from_freebsd_io(TunIo::new(fd, iface.is_tun()))?;
+        #[cfg(not(target_os = "freebsd"))]
         let io = TunQueue::new(fd)?;
         let tun = Self {
             iface: Arc::new(iface),
@@ -208,6 +217,20 @@ impl Tun {
             params.cloexec,
         )?;
         iface.init(params)?;
+        Ok(iface)
+    }
+
+    #[cfg(target_os = "freebsd")]
+    fn allocate(params: Params, queues: Option<usize>) -> Result<Interface> {
+        if queues.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "multi-queue is not supported on FreeBSD",
+            )
+            .into());
+        }
+        let iface = Interface::new(&params)?;
+        iface.init(&params)?;
         Ok(iface)
     }
 
@@ -318,7 +341,7 @@ impl Tun {
     /// point-to-point destinations are not reported by `getifaddrs`.
     ///
     /// This method performs synchronous platform-specific I/O (netlink on
-    /// Linux, `getifaddrs` on macOS) and should not be called from
+    /// Linux, `getifaddrs` on macOS and FreeBSD) and should not be called from
     /// latency-sensitive async code.
     ///
     /// ```no_run
