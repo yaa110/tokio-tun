@@ -1,0 +1,30 @@
+README.md
+  h_20fc4d483d1064 124-163,167-173
+src/builder.rs
+  h_20fc4d483d1064 28-29,63-64,150-176,379-385,508
+src/lib.rs
+  h_20fc4d483d1064 50-51,68-74
+src/linux/interface.rs
+  h_20fc4d483d1064 4,15-39,50-58,84,93,109-113,121-148,186-190,260-263,417,423,438-439
+src/linux/params.rs
+  h_20fc4d483d1064 8
+src/offload.rs
+  h_20fc4d483d1064 1-108
+src/queue.rs
+  h_20fc4d483d1064 38-40,113-115,127-129,200-224
+src/tun.rs
+  h_20fc4d483d1064 217,256-260,268-270,341-347,494
+tests/tun_test.rs
+  h_20fc4d483d1064 474-675
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9c338f30fe0b82e03922be9d13b6226c560336ba",
+  "prompts": {},
+  "humans": {
+    "h_20fc4d483d1064": {
+      "author": "Navid <3187511+yaa110@users.noreply.github.com>"
+    }
+  }
+}
