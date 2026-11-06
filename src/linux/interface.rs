@@ -9,20 +9,36 @@ use std::io;
 use std::mem;
 use std::net::Ipv4Addr;
 
-nix::ioctl_write_int!(tunsetiff, b'T', 202);
-nix::ioctl_write_int!(tunsetpersist, b'T', 203);
-nix::ioctl_write_int!(tunsetowner, b'T', 204);
-nix::ioctl_write_int!(tunsetgroup, b'T', 206);
-
-nix::ioctl_write_ptr_bad!(siocsifmtu, libc::SIOCSIFMTU, ifreq);
-nix::ioctl_write_ptr_bad!(siocsifflags, libc::SIOCSIFFLAGS, ifreq);
-
-nix::ioctl_read_bad!(siocgifmtu, libc::SIOCGIFMTU, ifreq);
-nix::ioctl_read_bad!(siocgifflags, libc::SIOCGIFFLAGS, ifreq);
-nix::ioctl_read_bad!(siocgifbrdaddr, libc::SIOCGIFBRDADDR, ifreq);
-nix::ioctl_read_bad!(siocgifnetmask, libc::SIOCGIFNETMASK, ifreq);
-
 const MAX_INTERFACE_NAME_LEN: usize = 15;
+
+fn ioctl_read(fd: i32, request: libc::Ioctl, req: *mut ifreq) -> Result<()> {
+    // SAFETY: The caller guarantees that `req` points to a valid `ifreq` for
+    // the duration of the call and that `request` accepts a pointer argument.
+    let result = unsafe { libc::ioctl(fd, request, req) };
+    if result < 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    Ok(())
+}
+
+fn ioctl_write(fd: i32, request: libc::Ioctl, req: *const ifreq) -> Result<()> {
+    // SAFETY: The caller guarantees that `req` points to a valid `ifreq` for
+    // the duration of the call and that `request` accepts a pointer argument.
+    let result = unsafe { libc::ioctl(fd, request, req) };
+    if result < 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    Ok(())
+}
+
+fn ioctl_int(fd: i32, request: libc::Ioctl, value: libc::c_ulong) -> Result<()> {
+    // SAFETY: The caller guarantees that `request` accepts an integer argument.
+    let result = unsafe { libc::ioctl(fd, request, value) };
+    if result < 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    Ok(())
+}
 
 pub struct Interface {
     fds: Vec<i32>,
@@ -47,9 +63,9 @@ impl Interface {
         }
         req.ifr_ifru.ifru_flags = flags;
         for &fd in &fds {
-            if let Err(err) = unsafe { tunsetiff(fd, &mut req as *mut _ as _) } {
+            if let Err(err) = ioctl_read(fd, libc::TUNSETIFF, &mut req) {
                 close_fds(&fds);
-                return Err(err.into());
+                return Err(err);
             }
         }
 
@@ -168,55 +184,54 @@ impl Interface {
         let mut req = ifreq::new(self.name());
         if let Some(mtu) = mtu {
             req.ifr_ifru.ifru_mtu = mtu;
-            unsafe { siocsifmtu(self.socket, &req) }?;
+            ioctl_write(self.socket, libc::SIOCSIFMTU as libc::Ioctl, &req)?;
         } else {
-            unsafe { siocgifmtu(self.socket, &mut req) }?;
+            ioctl_read(self.socket, libc::SIOCGIFMTU as libc::Ioctl, &mut req)?;
         }
         Ok(unsafe { req.ifr_ifru.ifru_mtu })
     }
 
     pub fn netmask(&self) -> Result<Ipv4Addr> {
         let mut req = ifreq::new(self.name());
-        unsafe { siocgifnetmask(self.socket, &mut req) }?;
+        ioctl_read(self.socket, libc::SIOCGIFNETMASK as libc::Ioctl, &mut req)?;
         let netmask = unsafe { req.ifr_ifru.ifru_netmask };
         Ok(ipv4_from_sockaddr(netmask))
     }
 
     pub fn broadcast(&self) -> Result<Ipv4Addr> {
         let mut req = ifreq::new(self.name());
-        unsafe { siocgifbrdaddr(self.socket, &mut req) }?;
+        ioctl_read(self.socket, libc::SIOCGIFBRDADDR as libc::Ioctl, &mut req)?;
         let broadcast = unsafe { req.ifr_ifru.ifru_broadaddr };
         Ok(ipv4_from_sockaddr(broadcast))
     }
 
     pub fn flags(&self, flags: Option<i16>) -> Result<i16> {
         let mut req = ifreq::new(self.name());
-        unsafe { siocgifflags(self.socket, &mut req) }?;
+        ioctl_read(self.socket, libc::SIOCGIFFLAGS as libc::Ioctl, &mut req)?;
         if let Some(flags) = flags {
             unsafe { req.ifr_ifru.ifru_flags |= flags };
-            unsafe { siocsifflags(self.socket, &req) }?;
+            ioctl_write(self.socket, libc::SIOCSIFFLAGS as libc::Ioctl, &req)?;
         }
         Ok(unsafe { req.ifr_ifru.ifru_flags })
     }
 
     pub fn owner(&self, owner: i32) -> Result<()> {
         for fd in self.fds.iter() {
-            unsafe { tunsetowner(*fd, owner as _) }?;
+            ioctl_int(*fd, libc::TUNSETOWNER, owner as libc::c_ulong)?;
         }
         Ok(())
     }
 
     pub fn group(&self, group: i32) -> Result<()> {
         for fd in self.fds.iter() {
-            unsafe { tunsetgroup(*fd, group as _) }?;
+            ioctl_int(*fd, libc::TUNSETGROUP, group as libc::c_ulong)?;
         }
         Ok(())
     }
 }
 
 pub(crate) fn set_persist(fd: i32, persist: bool) -> Result<()> {
-    unsafe { tunsetpersist(fd, libc::c_ulong::from(persist)) }?;
-    Ok(())
+    ioctl_int(fd, libc::TUNSETPERSIST, libc::c_ulong::from(persist))
 }
 
 impl Drop for Interface {

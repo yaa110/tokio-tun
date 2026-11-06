@@ -52,10 +52,10 @@ impl AddressConfig {
         if is_forbidden_local(self.address) {
             return Err("address must not be loopback, multicast, or broadcast");
         }
-        if let IpAddr::V4(address) = self.address {
-            if ipv4_broadcast(address, self.prefix_len) == Some(address) {
-                return Err("address must not be the directed broadcast address");
-            }
+        if let IpAddr::V4(address) = self.address
+            && ipv4_broadcast(address, self.prefix_len) == Some(address)
+        {
+            return Err("address must not be the directed broadcast address");
         }
         let max_prefix = match self.address {
             IpAddr::V4(_) => 32,
@@ -77,10 +77,10 @@ impl AddressConfig {
             if destination.is_ipv4() != self.address.is_ipv4() {
                 return Err("destination address family must match the address family");
             }
-            if let (IpAddr::V4(address), IpAddr::V4(destination)) = (self.address, destination) {
-                if ipv4_broadcast(address, self.prefix_len) == Some(destination) {
-                    return Err("destination must not be the directed broadcast address");
-                }
+            if let (IpAddr::V4(address), IpAddr::V4(destination)) = (self.address, destination)
+                && ipv4_broadcast(address, self.prefix_len) == Some(destination)
+            {
+                return Err("destination must not be the directed broadcast address");
             }
         }
         if self.broadcast.is_some() && self.address.is_ipv6() {
@@ -96,10 +96,10 @@ impl AddressConfig {
             {
                 return Err("invalid broadcast address");
             }
-            if let IpAddr::V4(address) = self.address {
-                if ipv4_broadcast(address, self.prefix_len) != Some(broadcast) {
-                    return Err("broadcast must match the directed broadcast address");
-                }
+            if let IpAddr::V4(address) = self.address
+                && ipv4_broadcast(address, self.prefix_len) != Some(broadcast)
+            {
+                return Err("broadcast must match the directed broadcast address");
             }
         }
         Ok(())

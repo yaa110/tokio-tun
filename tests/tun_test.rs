@@ -12,9 +12,6 @@ macro_rules! skip_without_cap_net_admin {
             Err(err) => {
                 let can_skip = matches!(
                     &err,
-                    tokio_tun::Error::NixError(nix::errno::Errno::EPERM)
-                ) || matches!(
-                    &err,
                     tokio_tun::Error::IoError(e)
                         if e.kind() == std::io::ErrorKind::PermissionDenied
                             || e.raw_os_error() == Some(libc::EPERM)
@@ -254,14 +251,14 @@ async fn test_packet_info() {
             .expect("send_to");
         if let Ok(Ok(n)) =
             tokio::time::timeout(std::time::Duration::from_millis(300), tun.recv(&mut buf)).await
+            && n >= 4
+            && buf[4..n].windows(payload.len()).any(|w| w == payload)
         {
-            if n >= 4 && buf[4..n].windows(payload.len()).any(|w| w == payload) {
-                // Packet info adds 4 bytes prefix: 2 bytes flags, 2 bytes proto (ETH_P_IP = 0x0800)
-                let proto = u16::from_be_bytes([buf[2], buf[3]]);
-                assert_eq!(proto, libc::ETH_P_IP as u16);
-                found = true;
-                break;
-            }
+            // Packet info adds 4 bytes prefix: 2 bytes flags, 2 bytes proto (ETH_P_IP = 0x0800)
+            let proto = u16::from_be_bytes([buf[2], buf[3]]);
+            assert_eq!(proto, libc::ETH_P_IP as u16);
+            found = true;
+            break;
         }
     }
     assert!(found, "expected payload with packet_info not received");
@@ -293,11 +290,10 @@ async fn test_async_read_write_traits() {
             .expect("send_to");
         if let Ok(Ok(n)) =
             tokio::time::timeout(std::time::Duration::from_millis(300), tun.read(&mut buf)).await
+            && buf[..n].windows(payload.len()).any(|w| w == payload)
         {
-            if buf[..n].windows(payload.len()).any(|w| w == payload) {
-                received_len = n;
-                break;
-            }
+            received_len = n;
+            break;
         }
     }
     assert!(received_len > 0, "payload not received through AsyncRead");

@@ -345,7 +345,6 @@ mod tests {
             Err(crate::Error::IoError(err)) => {
                 assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput)
             }
-            Err(_) => panic!("expected an invalid input error"),
             Ok(_) => panic!("expected an error"),
         }
     }

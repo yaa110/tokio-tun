@@ -138,11 +138,9 @@ impl Tun {
             iface: Arc::new(iface),
             io,
         };
-        if persist {
-            if let Err(err) = set_persist(tun.as_raw_fd(), true) {
-                let _ = set_persist(tun.as_raw_fd(), false);
-                return Err(err);
-            }
+        if persist && let Err(err) = set_persist(tun.as_raw_fd(), true) {
+            let _ = set_persist(tun.as_raw_fd(), false);
+            return Err(err);
         }
         Ok(tun)
     }
