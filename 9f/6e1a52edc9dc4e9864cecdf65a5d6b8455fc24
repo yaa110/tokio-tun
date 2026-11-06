@@ -1,0 +1,28 @@
+Cargo.toml
+  h_20fc4d483d1064 13
+README.md
+  h_20fc4d483d1064 125-146
+src/address.rs
+  h_20fc4d483d1064 20-29
+src/builder.rs
+  h_20fc4d483d1064 23,41,129-139,302-312,343,486-532
+src/linux/interface.rs
+  h_20fc4d483d1064 48,60,109,124-126,214-268
+src/linux/params.rs
+  h_20fc4d483d1064 13
+src/tun.rs
+  h_20fc4d483d1064 411-427
+tests/tun_test.rs
+  h_20fc4d483d1064 166-250
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9f6e1a52edc9dc4e9864cecdf65a5d6b8455fc24",
+  "prompts": {},
+  "humans": {
+    "h_20fc4d483d1064": {
+      "author": "Navid <3187511+yaa110@users.noreply.github.com>"
+    }
+  }
+}
