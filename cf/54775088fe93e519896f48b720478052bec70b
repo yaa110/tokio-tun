@@ -1,0 +1,22 @@
+examples/android/README.md
+  h_20fc4d483d1064 3-6
+examples/android/tun_bridge.rs
+  h_20fc4d483d1064 7-9
+examples/ios/README.md
+  h_20fc4d483d1064 3-6
+examples/ios/tun_bridge.rs
+  h_20fc4d483d1064 7-9
+tests/mobile_bridges.rs
+  h_20fc4d483d1064 1-13
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "cf54775088fe93e519896f48b720478052bec70b",
+  "prompts": {},
+  "humans": {
+    "h_20fc4d483d1064": {
+      "author": "Navid <3187511+yaa110@users.noreply.github.com>"
+    }
+  }
+}
