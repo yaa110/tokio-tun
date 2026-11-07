@@ -10,7 +10,7 @@ use crate::tun::Tun;
 #[cfg(target_os = "linux")]
 use libc::{IFF_NO_PI, IFF_TAP, IFF_TUN};
 use std::net::IpAddr;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use std::net::Ipv4Addr;
 
 const MAX_INTERFACE_NAME_LEN: usize = 15;
@@ -26,7 +26,7 @@ pub struct TunBuilder {
     packet_info: bool,
     #[cfg(target_os = "linux")]
     offload: bool,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     persist: bool,
     up: bool,
     mtu: Option<i32>,
@@ -34,7 +34,7 @@ pub struct TunBuilder {
     owner: Option<i32>,
     #[cfg(target_os = "linux")]
     group: Option<i32>,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     mac_address: Option<[u8; 6]>,
     addresses: Vec<AddressConfig>,
     invalid_reason: Option<&'static str>,
@@ -53,7 +53,7 @@ impl Default for TunBuilder {
             group: None,
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             is_tap: false,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             persist: false,
             up: false,
             mtu: None,
@@ -61,7 +61,7 @@ impl Default for TunBuilder {
             packet_info: false,
             #[cfg(target_os = "linux")]
             offload: false,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             mac_address: None,
             addresses: Vec::new(),
             invalid_reason: None,
@@ -86,7 +86,8 @@ impl TunBuilder {
     /// On macOS, only an empty name, `utun`, and `utunN` are supported.
     /// On FreeBSD, use an empty name, `tunN` for TUN, or `tapN` together with
     /// `tap()` for TAP. A pre-existing named interface is attached to without
-    /// changing whether it is transient.
+    /// changing whether it is transient unless `persist()`
+    /// is used.
     pub fn name(mut self, name: &str) -> Self {
         self.name = name.into();
         self
@@ -197,8 +198,9 @@ impl TunBuilder {
     /// MAC addresses are only supported for TAP devices, so this method must be
     /// used together with [`tap`](TunBuilder::tap); otherwise
     /// [`build`](TunBuilder::build) returns an error. The address must be a
-    /// non-zero unicast address.
-    #[cfg(target_os = "linux")]
+    /// non-zero unicast address. This is supported on Linux and FreeBSD; on
+    /// FreeBSD it changes the local/interface link address.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     pub fn mac_address(mut self, mac: [u8; 6]) -> Self {
         self.mac_address = Some(mac);
         self
@@ -280,7 +282,11 @@ impl TunBuilder {
     /// IPv6 has no broadcast address, so the most recently added address must
     /// be an IPv4 address. Call [`address`](TunBuilder::address) before this
     /// method; otherwise [`build`](TunBuilder::build) returns an error.
-    #[cfg(target_os = "linux")]
+    ///
+    /// On FreeBSD this applies to the most recently added IPv4 address, like
+    /// Linux. Only TAP supports it, and [`Tun::broadcast`](crate::Tun::broadcast)
+    /// reports the primary/first IPv4 address's broadcast.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     pub fn broadcast(mut self, broadcast: Ipv4Addr) -> Self {
         if let Some(config) = self.addresses.last_mut() {
             if config.address.is_ipv4() {
@@ -312,13 +318,15 @@ impl TunBuilder {
 
     /// Makes the device persistent.
     ///
-    /// Persistent devices stay registered as long as the computer is not restarted.
-    /// If another device with the same name is created afterwards, it will override the existing
-    /// one.
+    /// On Linux, persistent devices stay registered as long as the computer is
+    /// not restarted. If another device with the same name is created
+    /// afterwards, it will override the existing one. On FreeBSD, this removes
+    /// transient mode so the interface identity survives its last descriptor
+    /// being closed. FreeBSD clears addresses and the up state when the last
+    /// descriptor closes; they must be configured again after reattaching.
     ///
-    /// Non-persistent devices on the other hand, are removed as soon as the controlling process
-    /// exits.
-    #[cfg(target_os = "linux")]
+    /// Non-persistent devices are removed when the controlling process exits.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     pub fn persist(mut self) -> Self {
         self.persist = true;
         self
@@ -390,18 +398,18 @@ impl TunBuilder {
                 )
                 .into());
             }
-            if let Some(mac) = self.mac_address {
-                if !self.is_tap {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        "MAC address is only supported for TAP devices",
-                    )
-                    .into());
-                }
-                crate::address::validate_mac(mac).map_err(|reason| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidInput, reason)
-                })?;
+        }
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        if let Some(mac) = self.mac_address {
+            if !self.is_tap {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "MAC address is only supported for TAP devices",
+                )
+                .into());
             }
+            crate::address::validate_mac(mac)
+                .map_err(|reason| std::io::Error::new(std::io::ErrorKind::InvalidInput, reason))?;
         }
         for address in &self.addresses {
             address
@@ -426,6 +434,18 @@ impl TunBuilder {
                 )
                 .into());
             }
+        }
+        if !self.is_tap
+            && self
+                .addresses
+                .iter()
+                .any(|address| address.broadcast.is_some())
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "broadcast addresses are not supported for FreeBSD TUN devices",
+            )
+            .into());
         }
         if self.is_tap
             && self
@@ -541,8 +561,10 @@ impl From<TunBuilder> for Params {
                 Some(builder.name)
             },
             tap: builder.is_tap,
+            persist: builder.persist,
             up: builder.up,
             mtu: builder.mtu,
+            mac_address: builder.mac_address,
             addresses: builder.addresses,
             cloexec: builder.cloexec,
         }
@@ -596,7 +618,7 @@ mod tests {
         assert_eq!(builder.addresses[1].destination, Some(v6("fd00::2")));
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     #[test]
     fn broadcast_attaches_to_most_recent_ipv4_address() {
         let builder = TunBuilder::new()
@@ -634,7 +656,7 @@ mod tests {
         assert_invalid_input(TunBuilder::new().destination(v4(10, 0, 0, 2)).build());
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     #[test]
     fn build_rejects_broadcast_for_ipv6() {
         assert_invalid_input(
@@ -684,7 +706,7 @@ mod tests {
         assert_invalid_input(TunBuilder::new().queues(257).build());
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     #[test]
     fn build_rejects_mac_address_for_tun() {
         assert_invalid_input(
@@ -694,7 +716,7 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     #[test]
     fn build_rejects_invalid_mac_addresses() {
         assert_invalid_input(
@@ -711,7 +733,7 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     #[test]
     fn validate_accepts_mac_address_for_tap() {
         assert!(
@@ -723,7 +745,7 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     #[test]
     fn mac_address_can_be_set_before_tap() {
         assert!(

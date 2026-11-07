@@ -7,6 +7,24 @@ use tokio::net::UdpSocket;
 use tokio::time::{Duration, timeout};
 use tokio_tun::Tun;
 
+struct DestroyDevice(String);
+
+impl Drop for DestroyDevice {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("/sbin/ifconfig")
+            .args([&self.0, "destroy"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+}
+
+static DEVICE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+async fn serial_device_test() -> tokio::sync::MutexGuard<'static, ()> {
+    DEVICE_LOCK.lock().await
+}
+
 macro_rules! require_root {
     () => {
         if unsafe { libc::geteuid() } != 0 {
@@ -22,6 +40,7 @@ macro_rules! require_root {
 #[tokio::test]
 async fn test_freebsd_tun_device() {
     require_root!();
+    let _serial = serial_device_test().await;
 
     let tun = Tun::builder()
         .name("")
@@ -52,6 +71,7 @@ async fn test_freebsd_tun_device() {
 #[tokio::test]
 async fn test_freebsd_tun_packet_io() {
     require_root!();
+    let _serial = serial_device_test().await;
 
     let tun = Tun::builder()
         .name("")
@@ -103,6 +123,7 @@ async fn test_freebsd_tun_packet_io() {
 #[tokio::test]
 async fn test_freebsd_tap_device() {
     require_root!();
+    let _serial = serial_device_test().await;
 
     let tap = Tun::builder()
         .tap()
@@ -127,6 +148,7 @@ async fn test_freebsd_tap_device() {
 #[tokio::test]
 async fn test_freebsd_ipv6_address() {
     require_root!();
+    let _serial = serial_device_test().await;
 
     let tun = Tun::builder()
         .name("")
@@ -156,6 +178,7 @@ async fn test_freebsd_ipv6_address() {
 #[tokio::test]
 async fn test_freebsd_tun_ipv6_packet_io() {
     require_root!();
+    let _serial = serial_device_test().await;
 
     let tun = Tun::builder()
         .name("")
@@ -229,6 +252,7 @@ async fn test_freebsd_tun_ipv6_packet_io() {
 #[tokio::test]
 async fn test_freebsd_tun_queue_transfer() {
     require_root!();
+    let _serial = serial_device_test().await;
 
     let tun = Tun::builder()
         .name("")
@@ -279,6 +303,7 @@ async fn test_freebsd_tun_queue_transfer() {
 #[tokio::test]
 async fn test_freebsd_tun_address_without_destination() {
     require_root!();
+    let _serial = serial_device_test().await;
 
     let tun = Tun::builder()
         .name("")
@@ -312,6 +337,7 @@ async fn test_freebsd_rejects_non_128_ipv6_destination() {
 #[tokio::test]
 async fn test_freebsd_tun_truncation_is_reported() {
     require_root!();
+    let _serial = serial_device_test().await;
 
     let tun = Tun::builder()
         .name("")
@@ -350,4 +376,349 @@ async fn test_freebsd_rejects_tap_destination() {
         Err(tokio_tun::Error::IoError(ref err))
             if err.kind() == std::io::ErrorKind::InvalidInput
     ));
+}
+
+#[tokio::test]
+async fn test_freebsd_default_build_is_transient() {
+    require_root!();
+    let _serial = serial_device_test().await;
+
+    let tap = Tun::builder()
+        .tap()
+        .name("")
+        .build()
+        .unwrap()
+        .pop()
+        .unwrap();
+    let name = tap.name().to_owned();
+    let name_c = std::ffi::CString::new(name.clone()).unwrap();
+    drop(tap);
+    assert_eq!(
+        unsafe { libc::if_nametoindex(name_c.as_ptr()) },
+        0,
+        "non-persistent device {name} survived close"
+    );
+}
+
+#[tokio::test]
+async fn test_freebsd_tap_mac_address() {
+    require_root!();
+    let _serial = serial_device_test().await;
+
+    let tap = Tun::builder()
+        .tap()
+        .name("")
+        .mac_address([0x02, 0x11, 0x22, 0x33, 0x44, 0x55])
+        .up()
+        .build()
+        .unwrap()
+        .pop()
+        .unwrap();
+
+    assert_eq!(
+        tap.mac_address().unwrap(),
+        [0x02, 0x11, 0x22, 0x33, 0x44, 0x55]
+    );
+    tap.set_mac_address([0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee])
+        .unwrap();
+    assert_eq!(
+        tap.mac_address().unwrap(),
+        [0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]
+    );
+}
+
+#[tokio::test]
+async fn test_freebsd_tun_mac_address_unsupported() {
+    require_root!();
+    let _serial = serial_device_test().await;
+
+    let tun = Tun::builder().name("").up().build().unwrap().pop().unwrap();
+    assert!(matches!(
+        tun.mac_address(),
+        Err(tokio_tun::Error::IoError(ref err))
+            if err.kind() == std::io::ErrorKind::Unsupported
+    ));
+    assert!(matches!(
+        tun.set_mac_address([0x02, 0x11, 0x22, 0x33, 0x44, 0x55]),
+        Err(tokio_tun::Error::IoError(ref err))
+            if err.kind() == std::io::ErrorKind::Unsupported
+    ));
+    assert!(matches!(
+        tun.broadcast(),
+        Err(tokio_tun::Error::IoError(ref err))
+            if err.kind() == std::io::ErrorKind::Unsupported
+    ));
+}
+
+#[tokio::test]
+async fn test_freebsd_persist_survives_close_and_can_be_reattached() {
+    require_root!();
+    let _serial = serial_device_test().await;
+
+    let tap = Tun::builder()
+        .tap()
+        .name("")
+        .persist()
+        .up()
+        .build()
+        .unwrap()
+        .pop()
+        .unwrap();
+    let name = tap.name().to_owned();
+    let _cleanup = DestroyDevice(name.clone());
+    drop(tap);
+
+    let name_c = std::ffi::CString::new(name.clone()).unwrap();
+    assert!(
+        unsafe { libc::if_nametoindex(name_c.as_ptr()) } > 0,
+        "persistent device {name} disappeared after close"
+    );
+
+    // An unnamed allocation must not adopt the persistent device.
+    let other = Tun::builder()
+        .tap()
+        .name("")
+        .build()
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_ne!(other.name(), name);
+    drop(other);
+    assert!(
+        unsafe { libc::if_nametoindex(name_c.as_ptr()) } > 0,
+        "unnamed allocation adopted and destroyed persistent device {name}"
+    );
+
+    let reattached = Tun::builder()
+        .tap()
+        .name(&name)
+        .build()
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(reattached.name(), name);
+    drop(reattached);
+    assert!(
+        unsafe { libc::if_nametoindex(name_c.as_ptr()) } > 0,
+        "persistent device {name} disappeared after reattach close"
+    );
+
+    let status = std::process::Command::new("/sbin/ifconfig")
+        .args([&name, "destroy"])
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "failed to destroy persistent device {name}"
+    );
+}
+
+#[tokio::test]
+async fn test_freebsd_tap_broadcast() {
+    require_root!();
+    let _serial = serial_device_test().await;
+
+    let broadcast = Ipv4Addr::new(10, 218, 0, 255);
+    let tap = Tun::builder()
+        .tap()
+        .name("")
+        .address("10.218.0.1".parse().unwrap(), 24)
+        .broadcast(broadcast)
+        .up()
+        .build()
+        .unwrap()
+        .pop()
+        .unwrap();
+
+    assert_eq!(tap.broadcast().unwrap(), broadcast);
+    let address = tap
+        .addresses()
+        .unwrap()
+        .into_iter()
+        .find(|address| address.address == IpAddr::V4(Ipv4Addr::new(10, 218, 0, 1)))
+        .expect("tap IPv4 address");
+    assert_eq!(address.broadcast, Some(broadcast));
+}
+
+#[tokio::test]
+async fn test_freebsd_tun_rejects_broadcast() {
+    let result = Tun::builder()
+        .address("10.219.0.1".parse().unwrap(), 24)
+        .broadcast(Ipv4Addr::new(10, 219, 0, 255))
+        .build();
+    assert!(matches!(
+        result,
+        Err(tokio_tun::Error::IoError(ref err))
+            if err.kind() == std::io::ErrorKind::InvalidInput
+    ));
+}
+
+#[tokio::test]
+async fn test_freebsd_tap_broadcast_is_per_address() {
+    require_root!();
+    let _serial = serial_device_test().await;
+
+    let first = Ipv4Addr::new(10, 235, 0, 255);
+    let second = Ipv4Addr::new(10, 236, 0, 255);
+    let tap = Tun::builder()
+        .tap()
+        .name("")
+        .address("10.235.0.1".parse().unwrap(), 24)
+        .broadcast(first)
+        .address("10.236.0.1".parse().unwrap(), 24)
+        .broadcast(second)
+        .up()
+        .build()
+        .unwrap()
+        .pop()
+        .unwrap();
+
+    let addresses = tap.addresses().unwrap();
+    for (address, broadcast) in [
+        (Ipv4Addr::new(10, 235, 0, 1), first),
+        (Ipv4Addr::new(10, 236, 0, 1), second),
+    ] {
+        let info = addresses
+            .iter()
+            .find(|info| info.address == IpAddr::V4(address))
+            .expect("configured IPv4 address");
+        assert_eq!(info.broadcast, Some(broadcast));
+    }
+    assert_eq!(tap.broadcast().unwrap(), first);
+}
+
+#[tokio::test]
+async fn test_freebsd_tap_host_prefix_has_no_broadcast() {
+    require_root!();
+    let _serial = serial_device_test().await;
+
+    let tap = Tun::builder()
+        .tap()
+        .name("")
+        .address("10.234.0.1".parse().unwrap(), 32)
+        .up()
+        .build()
+        .unwrap()
+        .pop()
+        .unwrap();
+
+    let address = tap
+        .addresses()
+        .unwrap()
+        .into_iter()
+        .find(|address| address.address == IpAddr::V4(Ipv4Addr::new(10, 234, 0, 1)))
+        .expect("tap /32 address");
+    assert_eq!(address.broadcast, None);
+    assert!(matches!(
+        tap.broadcast(),
+        Err(tokio_tun::Error::IoError(ref err))
+            if err.kind() == std::io::ErrorKind::AddrNotAvailable
+    ));
+}
+
+fn freebsd_device_names() -> Vec<String> {
+    let output = std::process::Command::new("/sbin/ifconfig")
+        .arg("-l")
+        .output()
+        .expect("ifconfig -l");
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .filter(|name| name.starts_with("tun") || name.starts_with("tap"))
+        .map(str::to_owned)
+        .collect()
+}
+
+#[tokio::test]
+async fn test_freebsd_failed_persistent_build_does_not_leave_interface() {
+    require_root!();
+    let _serial = serial_device_test().await;
+
+    let before = freebsd_device_names();
+    let result = Tun::builder().tap().name("").persist().mtu(-1).build();
+    assert!(result.is_err(), "invalid MTU unexpectedly succeeded");
+
+    let after = freebsd_device_names();
+    assert_eq!(after, before, "failed persistent build leaked an interface");
+}
+
+#[tokio::test]
+async fn test_freebsd_renamed_persistent_device_is_not_adopted() {
+    require_root!();
+    let _serial = serial_device_test().await;
+
+    let tap = Tun::builder()
+        .tap()
+        .name("")
+        .persist()
+        .address("10.237.0.1".parse().unwrap(), 24)
+        .up()
+        .build()
+        .unwrap()
+        .pop()
+        .unwrap();
+    let name = tap.name().to_owned();
+    let _cleanup_original = DestroyDevice(name.clone());
+    drop(tap);
+
+    let status = std::process::Command::new("/sbin/ifconfig")
+        .args([&name, "inet", "10.237.0.1/24", "up"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "failed to configure persistent device {name}"
+    );
+
+    let renamed = "renamedoff0";
+    let status = std::process::Command::new("/sbin/ifconfig")
+        .args([&name, "name", renamed])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "failed to rename persistent device {name}"
+    );
+    let _cleanup = DestroyDevice(renamed.to_owned());
+
+    let renamed_c = std::ffi::CString::new(renamed).unwrap();
+    assert!(unsafe { libc::if_nametoindex(renamed_c.as_ptr()) } > 0);
+
+    let other = Tun::builder()
+        .tap()
+        .name("")
+        .build()
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_ne!(other.name(), name);
+    drop(other);
+    assert!(
+        unsafe { libc::if_nametoindex(renamed_c.as_ptr()) } > 0,
+        "unnamed allocation destroyed renamed persistent device"
+    );
+
+    let result = Tun::builder().tap().name(&name).build();
+    assert!(result.is_err(), "stale device name unexpectedly attached");
+    assert!(
+        unsafe { libc::if_nametoindex(renamed_c.as_ptr()) } > 0,
+        "explicit stale name destroyed renamed persistent device"
+    );
+
+    let output = std::process::Command::new("/sbin/ifconfig")
+        .arg(renamed)
+        .output()
+        .unwrap();
+    let config = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        config.contains("10.237.0.1"),
+        "renamed interface lost its address"
+    );
+    assert!(
+        config.contains("<UP"),
+        "renamed interface lost its up state"
+    );
 }

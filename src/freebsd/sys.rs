@@ -7,7 +7,7 @@ pub const IN6_IFF_NODAD: c_int = 0x20;
 pub struct IfAliasReq {
     pub ifra_name: [c_char; IFNAMSIZ],
     pub ifra_addr: sockaddr,
-    pub ifra_dstaddr: sockaddr,
+    pub ifra_broadaddr: sockaddr,
     pub ifra_mask: sockaddr,
     pub ifra_vhid: c_int,
 }
@@ -45,8 +45,12 @@ pub const SIOCSIFFLAGS: c_ulong = ioctl_req(IOC_IN, b'i', 16, size_of::<libc::if
 pub const SIOCGIFFLAGS: c_ulong = ioctl_req(IOC_INOUT, b'i', 17, size_of::<libc::ifreq>());
 pub const SIOCSIFMTU: c_ulong = ioctl_req(IOC_IN, b'i', 52, size_of::<libc::ifreq>());
 pub const SIOCGIFMTU: c_ulong = ioctl_req(IOC_INOUT, b'i', 51, size_of::<libc::ifreq>());
+pub const SIOCSIFLLADDR: c_ulong = ioctl_req(IOC_IN, b'i', 60, size_of::<libc::ifreq>());
+pub const SIOCIFDESTROY: c_ulong = ioctl_req(IOC_IN, b'i', 121, size_of::<libc::ifreq>());
+pub const SIOCIFCREATE2: c_ulong = ioctl_req(IOC_INOUT, b'i', 124, size_of::<libc::ifreq>());
 pub const SIOCAIFADDR: c_ulong = ioctl_req(IOC_IN, b'i', 43, size_of::<IfAliasReq>());
 pub const SIOCAIFADDR_IN6: c_ulong = ioctl_req(IOC_IN, b'i', 27, size_of::<In6AliasReq>());
+pub const TUNGIFNAME: c_ulong = ioctl_req(IOC_OUT, b't', 93, size_of::<libc::ifreq>());
 pub const TUNSIFHEAD: c_ulong = ioctl_req(IOC_IN, b't', 96, size_of::<c_int>());
 pub const TUNGIFHEAD: c_ulong = ioctl_req(IOC_OUT, b't', 97, size_of::<c_int>());
 pub const TUNSTRANSIENT: c_ulong = ioctl_req(IOC_IN, b't', 98, size_of::<c_int>());
