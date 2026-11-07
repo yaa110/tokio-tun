@@ -1,0 +1,28 @@
+README.md
+  h_20fc4d483d1064 54-58,69,72-73,177,191,206,209-214
+src/address.rs
+  h_20fc4d483d1064 20,43-47
+src/builder.rs
+  h_20fc4d483d1064 13,29,37,56,64,89-90,201-203,285-289,321-326,328-329,401-409,411-412,438-449,564,567,621,659,709,719,736,748
+src/freebsd/interface.rs
+  h_20fc4d483d1064 8,92-94,243-259,264,272-371,381,391-393,429-433,472-519,543-564,570-593
+src/freebsd/params.rs
+  h_20fc4d483d1064 7,10
+src/freebsd/sys.rs
+  h_20fc4d483d1064 10,48-50,53
+src/tun.rs
+  h_20fc4d483d1064 6,109,143-146,422-426,434-436,445-447
+tests/freebsd_test.rs
+  h_20fc4d483d1064 10-27,43,74,126,151,181,255,306,340,380-724
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6388336a2edc65a2803312f84e8045bc639144a6",
+  "prompts": {},
+  "humans": {
+    "h_20fc4d483d1064": {
+      "author": "Navid <3187511+yaa110@users.noreply.github.com>"
+    }
+  }
+}
