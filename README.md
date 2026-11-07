@@ -127,7 +127,8 @@ headers automatically; TAP descriptors carry raw Ethernet frames.
 be attached later using the same interface name. Do not repeat address
 configuration when attaching an additional queue. If the device was created
 with `.offload()`, every attached queue must also call `.offload()`; an offload
-state mismatch is rejected.
+state mismatch is rejected. See
+[`add-queue`](examples/add-queue.rs) for a complete example.
 
 ### Linux offload (TSO/GSO/GRO)
 
@@ -294,6 +295,7 @@ app-level bridge:
 
 - [`read`](examples/read.rs): Create a TUN device and read packets from it.
 - [`read-mq`](examples/read-mq.rs): Read from multi-queue tun using `tokio::select!` (Linux only).
+- [`add-queue`](examples/add-queue.rs): Attach a second queue to an existing Linux multi-queue device.
 - [`multiple-addresses`](examples/multiple-addresses.rs): Assign multiple IPv4 and IPv6 addresses to one tun.
 - [`android`](examples/android/README.md): Android `VpnService` + Kotlin/JNI + Rust `TunQueue` bridge.
 - [`ios`](examples/ios/README.md): iOS `NEPacketTunnelProvider` + Swift socket-pair + Rust `TunQueue` bridge.
@@ -303,4 +305,5 @@ sudo -E $(which cargo) run --example read
 sudo -E $(which cargo) run --example multiple-addresses
 # Linux only:
 sudo -E $(which cargo) run --example read-mq
+sudo -E $(which cargo) run --example add-queue
 ```
