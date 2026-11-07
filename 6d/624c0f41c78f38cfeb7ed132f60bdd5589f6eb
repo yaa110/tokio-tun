@@ -1,0 +1,18 @@
+Cargo.toml
+  h_20fc4d483d1064 13
+README.md
+  h_20fc4d483d1064 130-131,298,308
+examples/add-queue.rs
+  h_20fc4d483d1064 1-79
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6d624c0f41c78f38cfeb7ed132f60bdd5589f6eb",
+  "prompts": {},
+  "humans": {
+    "h_20fc4d483d1064": {
+      "author": "Navid <3187511+yaa110@users.noreply.github.com>"
+    }
+  }
+}
