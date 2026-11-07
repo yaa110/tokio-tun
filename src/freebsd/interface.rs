@@ -5,7 +5,7 @@ use super::address::{
 use super::params::Params;
 use super::sys::*;
 use crate::Result;
-use crate::address::{AddressConfig, AddressInfo};
+use crate::address::{AddressConfig, AddressInfo, ipv4_broadcast};
 use std::ffi::{CStr, CString};
 use std::io;
 use std::mem;
@@ -27,7 +27,6 @@ impl Interface {
     pub fn new(params: &Params) -> Result<Self> {
         let prefix = if params.tap { "tap" } else { "tun" };
         let requested = params.name.as_deref().unwrap_or("");
-        let existed = !requested.is_empty() && if_nametoindex(requested).is_ok();
         let (fd, name) = open_device(prefix, requested, params.cloexec)?;
 
         if !params.tap {
@@ -36,17 +35,6 @@ impl Interface {
             let enable: libc::c_int = 1;
             // SAFETY: `fd` is open and TUNSIFHEAD expects an `int` pointer.
             if unsafe { libc::ioctl(fd, TUNSIFHEAD, &enable) } < 0 {
-                let err = io::Error::last_os_error();
-                // SAFETY: `fd` is owned by this function on the error path.
-                unsafe { libc::close(fd) };
-                return Err(err.into());
-            }
-        }
-
-        if !existed {
-            let transient: libc::c_int = 1;
-            // SAFETY: `fd` is open and TUNSTRANSIENT expects an `int` pointer.
-            if unsafe { libc::ioctl(fd, TUNSTRANSIENT, &transient) } < 0 {
                 let err = io::Error::last_os_error();
                 // SAFETY: `fd` is owned by this function on the error path.
                 unsafe { libc::close(fd) };
@@ -100,6 +88,9 @@ impl Interface {
     pub fn init(&self, params: &Params) -> Result<()> {
         if let Some(mtu) = params.mtu {
             self.mtu(Some(mtu))?;
+        }
+        if let Some(mac) = params.mac_address {
+            self.set_mac_address(mac)?;
         }
         for address in &params.addresses {
             self.add_address(address)?;
@@ -249,16 +240,133 @@ impl Interface {
                 } else {
                     None
                 };
+                let broadcast = if let IpAddr::V4(ipv4) = address {
+                    if prefix_len < 31
+                        && ifa.ifa_flags & libc::IFF_BROADCAST as u32 != 0
+                        && sockaddr_is(
+                            ifa.ifa_dstaddr,
+                            libc::AF_INET,
+                            mem::size_of::<libc::sockaddr_in>(),
+                        )
+                    {
+                        let broadcast = ipv4_from_sockaddr(ifa.ifa_dstaddr);
+                        (ipv4_broadcast(ipv4, prefix_len) == Some(broadcast)).then_some(broadcast)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
                 addresses.push(AddressInfo {
                     address,
                     prefix_len,
                     destination,
-                    broadcast: None,
+                    broadcast,
                 });
             }
             current = ifa.ifa_next;
         }
         Ok(addresses)
+    }
+
+    pub fn mac_address(&self) -> Result<[u8; 6]> {
+        if self.is_tun {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "interface has no hardware address",
+            )
+            .into());
+        }
+
+        let mut ifap: *mut libc::ifaddrs = ptr::null_mut();
+        // SAFETY: `ifap` is a valid out-pointer and the returned list is
+        // released by `freeifaddrs` below.
+        if unsafe { libc::getifaddrs(&mut ifap) } != 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        let guard = Ifaddrs(ifap);
+        let mut current = guard.0;
+        while !current.is_null() {
+            // SAFETY: `current` is a node in the list returned by getifaddrs.
+            let ifa = unsafe { &*current };
+            if !ifa.ifa_name.is_null()
+                && unsafe { CStr::from_ptr(ifa.ifa_name) }.to_bytes() == self.name.as_bytes()
+                && !ifa.ifa_addr.is_null()
+            {
+                // SAFETY: `ifa_addr` points to a valid `sockaddr` header.
+                let header = unsafe { &*ifa.ifa_addr.cast::<libc::sockaddr>() };
+                if i32::from(header.sa_family) == libc::AF_LINK {
+                    // SAFETY: an AF_LINK address is a `sockaddr_dl`; validate
+                    // its declared length before reading link-layer data.
+                    let sdl = unsafe { &*ifa.ifa_addr.cast::<libc::sockaddr_dl>() };
+                    let start = usize::from(sdl.sdl_nlen);
+                    let end = 8usize
+                        .checked_add(start)
+                        .and_then(|offset| offset.checked_add(6))
+                        .unwrap_or(usize::MAX);
+                    if sdl.sdl_alen == 6
+                        && usize::from(sdl.sdl_len) >= end
+                        && start + 6 <= sdl.sdl_data.len()
+                    {
+                        let mut mac = [0u8; 6];
+                        for (dst, src) in mac.iter_mut().zip(&sdl.sdl_data[start..start + 6]) {
+                            *dst = src.to_ne_bytes()[0];
+                        }
+                        return Ok(mac);
+                    }
+                }
+            }
+            current = ifa.ifa_next;
+        }
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "interface has no hardware address",
+        )
+        .into())
+    }
+
+    pub fn set_mac_address(&self, mac: [u8; 6]) -> Result<()> {
+        if self.is_tun {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "interface has no hardware address",
+            )
+            .into());
+        }
+        crate::address::validate_mac(mac)
+            .map_err(|reason| io::Error::new(io::ErrorKind::InvalidInput, reason))?;
+
+        let mut req = ifreq_for(&self.name);
+        // SAFETY: `ifreq` is fully initialized before the ioctl call.
+        unsafe {
+            req.ifr_ifru.ifru_addr.sa_len = 6;
+            req.ifr_ifru.ifru_addr.sa_family = libc::AF_LINK as _;
+            for (dst, src) in req.ifr_ifru.ifru_addr.sa_data.iter_mut().zip(mac) {
+                *dst = src as libc::c_char;
+            }
+        }
+        ioctl_ptr(self.socket, SIOCSIFLLADDR, &req)
+    }
+
+    pub fn broadcast(&self) -> Result<Ipv4Addr> {
+        if self.is_tun {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "interface has no broadcast address",
+            )
+            .into());
+        }
+        self.addresses()?
+            .iter()
+            .find(|address| address.address.is_ipv4())
+            .and_then(|address| address.broadcast)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::AddrNotAvailable,
+                    "interface has no broadcast address",
+                )
+                .into()
+            })
     }
 
     fn add_address(&self, config: &AddressConfig) -> Result<()> {
@@ -270,7 +378,7 @@ impl Interface {
                 let destination = if self.is_tun {
                     Some(config.destination.unwrap_or(IpAddr::V4(address)))
                 } else {
-                    config.destination
+                    None
                 };
                 if let Some(destination) = destination {
                     let IpAddr::V4(destination) = destination else {
@@ -280,7 +388,9 @@ impl Interface {
                         )
                         .into());
                     };
-                    req.ifra_dstaddr = sockaddr_v4(destination);
+                    req.ifra_broadaddr = sockaddr_v4(destination);
+                } else if let Some(broadcast) = config.broadcast {
+                    req.ifra_broadaddr = sockaddr_v4(broadcast);
                 }
                 req.ifra_mask = sockaddr_v4(prefix_to_ipv4_mask(config.prefix_len));
                 ioctl_ptr(self.socket, SIOCAIFADDR, &req)
@@ -314,6 +424,11 @@ impl Interface {
             }
         }
     }
+}
+
+pub(crate) fn set_persist(fd: i32, persist: bool) -> Result<()> {
+    let transient: libc::c_int = if persist { 0 } else { 1 };
+    ioctl_ptr(fd, TUNSTRANSIENT, &transient)
 }
 
 impl Drop for Interface {
@@ -354,6 +469,54 @@ fn close_fds(fds: &[i32]) {
     }
 }
 
+fn device_name(fd: i32) -> io::Result<String> {
+    let mut req = ifreq_for("");
+    // SAFETY: TUNGIFNAME writes the interface name into the ifreq buffer.
+    if unsafe { libc::ioctl(fd, TUNGIFNAME, &mut req) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let bytes: Vec<u8> = req
+        .ifr_name
+        .iter()
+        .take_while(|&&byte| byte != 0)
+        .map(|&byte| byte as u8)
+        .collect();
+    String::from_utf8(bytes)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid interface name"))
+}
+
+fn destroy_device(req: &libc::ifreq) {
+    if let Ok(socket) = create_socket(libc::AF_INET, 0) {
+        let _ = ioctl_ptr(socket, SIOCIFDESTROY, req);
+        // SAFETY: `socket` is owned by this function.
+        unsafe { libc::close(socket) };
+    }
+}
+
+fn create_device(name: &str, cloexec: bool) -> Result<i32> {
+    let socket = create_socket(libc::AF_INET, 0)?;
+    let mut req = ifreq_for(name);
+    let result = ioctl_ptr_mut(socket, SIOCIFCREATE2, &mut req);
+    // SAFETY: `socket` is owned by this function.
+    unsafe { libc::close(socket) };
+    result?;
+
+    let fd = match open_path(&format!("/dev/{name}"), cloexec) {
+        Ok(fd) => fd,
+        Err(err) => {
+            destroy_device(&req);
+            return Err(err.into());
+        }
+    };
+    if let Err(err) = set_persist(fd, false) {
+        // SAFETY: `fd` is owned by this function on the error path.
+        unsafe { libc::close(fd) };
+        destroy_device(&req);
+        return Err(err);
+    }
+    Ok(fd)
+}
+
 fn open_device(prefix: &str, requested: &str, cloexec: bool) -> Result<(i32, String)> {
     if !requested.is_empty() {
         if requested.len() > MAX_INTERFACE_NAME_LEN
@@ -377,16 +540,57 @@ fn open_device(prefix: &str, requested: &str, cloexec: bool) -> Result<(i32, Str
             )
             .into());
         }
-        let fd = open_path(&format!("/dev/{requested}"), cloexec)?;
-        return Ok((fd, requested.to_owned()));
+        let fd = if if_nametoindex(requested).is_ok() {
+            open_path(&format!("/dev/{requested}"), cloexec)?
+        } else {
+            create_device(requested, cloexec)?
+        };
+        match device_name(fd) {
+            Ok(actual) if actual == requested => return Ok((fd, requested.to_owned())),
+            Ok(actual) => {
+                // SAFETY: `fd` is owned by this function on the error path.
+                unsafe { libc::close(fd) };
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("device {requested} is attached to interface {actual}"),
+                )
+                .into());
+            }
+            Err(err) => {
+                // SAFETY: `fd` is owned by this function on the error path.
+                unsafe { libc::close(fd) };
+                return Err(err.into());
+            }
+        }
     }
 
     let mut last_error = None;
     for index in 0..256 {
         let name = format!("{prefix}{index}");
-        match open_path(&format!("/dev/{name}"), cloexec) {
-            Ok(fd) => return Ok((fd, name)),
-            Err(err) => last_error = Some(err),
+        if if_nametoindex(&name).is_ok() {
+            continue;
+        }
+        match create_device(&name, cloexec) {
+            Ok(fd) => match device_name(fd) {
+                Ok(actual) if actual == name => return Ok((fd, name)),
+                Ok(_) => {
+                    // SAFETY: `fd` is owned by this function on the error path.
+                    unsafe { libc::close(fd) };
+                    last_error = Some(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        format!("device {name} is attached to a renamed interface"),
+                    ));
+                }
+                Err(err) => {
+                    // SAFETY: `fd` is owned by this function on the error path.
+                    unsafe { libc::close(fd) };
+                    last_error = Some(err);
+                }
+            },
+            Err(err) => {
+                let crate::Error::IoError(err) = err;
+                last_error = Some(err);
+            }
         }
     }
     Err(last_error

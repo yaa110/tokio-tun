@@ -3,7 +3,7 @@ use crate::TunBuilder;
 use crate::TunQueue;
 use crate::address::AddressInfo;
 #[cfg(target_os = "freebsd")]
-use crate::freebsd::interface::Interface;
+use crate::freebsd::interface::{Interface, set_persist as set_freebsd_persist};
 #[cfg(target_os = "freebsd")]
 use crate::freebsd::io::TunIo;
 #[cfg(target_os = "freebsd")]
@@ -106,7 +106,7 @@ impl Tun {
 
     /// Creates a new instance of Tun/Tap device.
     pub(crate) fn new(params: Params) -> Result<Self> {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         let persist = params.persist;
         let mut iface = Self::allocate(params, None)?;
         let mut fds: Vec<OwnedFd> = iface
@@ -139,6 +139,10 @@ impl Tun {
         if persist && let Err(err) = set_persist(tun.as_raw_fd(), true) {
             let _ = set_persist(tun.as_raw_fd(), false);
             return Err(err);
+        }
+        #[cfg(target_os = "freebsd")]
+        if persist {
+            set_freebsd_persist(tun.as_raw_fd(), true)?;
         }
         Ok(tun)
     }
@@ -415,7 +419,11 @@ impl Tun {
     }
 
     /// Returns the IPv4 broadcast address of the device.
-    #[cfg(target_os = "linux")]
+    ///
+    /// On FreeBSD this is available for TAP devices only and returns the
+    /// primary/first IPv4 address's broadcast. Use
+    /// [`addresses`](Tun::addresses) for per-address broadcast values.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     pub fn broadcast(&self) -> Result<Ipv4Addr> {
         self.iface.broadcast()
     }
@@ -423,8 +431,9 @@ impl Tun {
     /// Returns the MAC address of the TAP device.
     ///
     /// TUN devices have no hardware address, so this returns an
-    /// [`Unsupported`](std::io::ErrorKind::Unsupported) error for them.
-    #[cfg(target_os = "linux")]
+    /// [`Unsupported`](std::io::ErrorKind::Unsupported) error for them. On
+    /// FreeBSD this is the local/interface link address.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     pub fn mac_address(&self) -> Result<[u8; 6]> {
         self.iface.mac_address()
     }
@@ -433,8 +442,9 @@ impl Tun {
     ///
     /// The address must be a non-zero unicast address. TUN devices have no
     /// hardware address and return an
-    /// [`Unsupported`](std::io::ErrorKind::Unsupported) error.
-    #[cfg(target_os = "linux")]
+    /// [`Unsupported`](std::io::ErrorKind::Unsupported) error. On FreeBSD this
+    /// changes the local/interface link address.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     pub fn set_mac_address(&self, mac: [u8; 6]) -> Result<()> {
         self.iface.set_mac_address(mac)
     }

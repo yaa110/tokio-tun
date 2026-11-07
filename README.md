@@ -51,8 +51,11 @@ times. Every call carries its own prefix length, so IPv4 and IPv6 addresses are
 independent. `destination` configures the point-to-point peer of the most
 recently added address. On Linux, `broadcast` also applies to the most recently
 added address and is available for IPv4 only, because IPv6 has no broadcast
-address. On macOS and FreeBSD, TUN IPv6 destinations require a `/128` prefix.
-FreeBSD TAP devices do not support destinations.
+address. FreeBSD supports broadcast on TAP only and stores it per address;
+`Tun::broadcast()` reports the primary/first IPv4 address's broadcast, while
+`Tun::addresses()` reports each address's value. On macOS and FreeBSD, TUN IPv6
+destinations require a `/128` prefix. FreeBSD TAP devices do not support
+destinations.
 
 Packets written back to a TUN device must be valid IPv4/IPv6 packets. Use
 `Tun::send`, `Tun::sendv`, or `Tun::send_all` with an IP packet payload.
@@ -63,10 +66,11 @@ Packets written back to a TUN device must be valid IPv4/IPv6 packets. Use
 sudo -E $(which cargo) run --example read
 ```
 
-### MAC address (Linux TAP only)
+### MAC address (TAP only)
 
 TAP devices have a MAC address; TUN devices do not. Set it when building the
-device, or read and change it at runtime:
+device, or read and change it at runtime. This is supported on Linux and
+FreeBSD:
 
 ```rust
 use tokio_tun::Tun;
@@ -170,7 +174,7 @@ interface MTU.
 | macOS | ✅ | ❌ | ❌ | ❌ | `utun`; TUN only |
 | Android | ✅ | ❌ | ❌ | ❌ | `TunQueue` only; `VpnService` fd |
 | iOS | ✅ | ❌ | ❌ | ❌ | `TunQueue` only; NetworkExtension bridge |
-| FreeBSD | ✅ | ✅ | ❌ | ❌ | `/dev/tun` and `/dev/tap`; TUN uses BSD address-family headers internally |
+| FreeBSD | ✅ | ✅ | ❌ | ❌ | `/dev/tun` and `/dev/tap`; TAP MAC/broadcast/persist; TUN uses BSD address-family headers internally |
 
 Mobile support is I/O-only: it wraps an externally supplied packet descriptor
 and does not allocate devices or integrate with `VpnService` /
@@ -184,7 +188,7 @@ macOS uses the built-in `utun` driver. Only layer-3 TUN is available:
 - IPv4/IPv6 addresses, MTU, flags, and async I/O are supported.
 - IPv4 destinations are supported. IPv6 destinations require a `/128` prefix.
 - macOS does not report IPv6 point-to-point destinations through `getifaddrs`, so `Tun::destination()` may return `AddrNotAvailable` for IPv6-only setups.
-- TAP is available on Linux and FreeBSD, but not macOS. `packet_info`, multi-queue, persist, owner/group, MAC address, and broadcast APIs are Linux-only.
+- TAP is available on Linux and FreeBSD, but not macOS. `packet_info`, multi-queue, and owner/group are Linux-only. MAC address is available on both Linux and FreeBSD TAP devices; FreeBSD broadcast is TAP-only.
 - Packets larger than the receive buffer return an error on macOS instead of being truncated.
 - `utun` creation requires root privileges.
 
@@ -199,11 +203,15 @@ FreeBSD supports TUN and TAP devices through the standard `/dev/tunN` and
   `Tun` and `TunQueue::new` handle it transparently.
 - TUN IPv4 addresses without an explicit destination use the local address as
   the peer. TUN IPv6 destinations require `/128`; TAP destinations are rejected.
-- Devices created by the crate are transient and are destroyed when the last descriptor is closed. Attaching to an existing named `tunN`/`tapN` device does not change its lifetime.
+- Devices created by the crate are transient by default and are destroyed when the last descriptor is closed. Use `persist()` to keep the interface identity after close; FreeBSD clears addresses and the up state when the last descriptor closes, so reapply configuration on reattach. Attaching to an existing named `tunN`/`tapN` device does not change its lifetime unless `persist()` is used.
 - FreeBSD TUN receive reports a truncated packet when the buffer is too small; raw TAP descriptors may silently truncate.
 - Creating and configuring devices requires root privileges.
-- `packet_info`, `persist`, owner/group, MAC address, and Linux broadcast APIs
-  are not available on FreeBSD.
+- TAP MAC addresses are supported through `mac_address()` and
+  `set_mac_address()`; this changes the local/interface MAC. Broadcast is
+  supported for TAP only and is stored per IPv4 address. The kernel derives it
+  from the prefix, and prefixes of 31 or 32 bits have no broadcast address.
+- `packet_info`, owner/group, multi-queue, and Linux offload APIs are not
+  available on FreeBSD.
 
 ### Android
 
