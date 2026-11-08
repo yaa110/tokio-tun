@@ -32,7 +32,11 @@ pub(crate) fn validate_mac(mac: [u8; 6]) -> std::result::Result<(), &'static str
 ///
 /// See [`Tun::addresses`](crate::Tun::addresses) for retrieving all addresses
 /// assigned to a device.
+///
+/// This type is `#[non_exhaustive]` so future releases can add fields (for
+/// example an IPv6 scope ID) without breaking 1.x.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct AddressInfo {
     /// IP address of the device.
     pub address: IpAddr,
@@ -154,6 +158,7 @@ fn is_forbidden_v6(address: Ipv6Addr, include_unspecified: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use std::net::Ipv6Addr;
 
     fn config(address: IpAddr, prefix_len: u8) -> AddressConfig {
@@ -162,6 +167,24 @@ mod tests {
             prefix_len,
             destination: None,
             broadcast: None,
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn directed_broadcast_preserves_network_bits(address: [u8; 4], prefix_len in 1u8..=30) {
+            let address = Ipv4Addr::from(address);
+            let broadcast = ipv4_broadcast(address, prefix_len).expect("broadcast");
+            let mask = u32::MAX << (32 - u32::from(prefix_len));
+            let network = u32::from_be_bytes(address.octets()) & mask;
+            let broadcast_bits = u32::from_be_bytes(broadcast.octets());
+            prop_assert_eq!(broadcast_bits & mask, network);
+            prop_assert_eq!(broadcast_bits | mask, u32::MAX);
+        }
+
+        #[test]
+        fn host_prefixes_have_no_broadcast(address: [u8; 4], prefix_len in 31u8..=32) {
+            prop_assert_eq!(ipv4_broadcast(Ipv4Addr::from(address), prefix_len), None);
         }
     }
 

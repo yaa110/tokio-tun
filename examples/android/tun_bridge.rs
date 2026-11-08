@@ -17,11 +17,14 @@ use tokio::runtime::Runtime;
 use tokio::task::JoinHandle;
 use tokio_tun::TunQueue;
 
-static RUNTIME: OnceLock<Runtime> = OnceLock::new();
+static RUNTIME: OnceLock<Result<Runtime, String>> = OnceLock::new();
 static TASK: OnceLock<Mutex<Option<JoinHandle<()>>>> = OnceLock::new();
 
-fn runtime() -> &'static Runtime {
-    RUNTIME.get_or_init(|| Runtime::new().expect("failed to create Tokio runtime"))
+fn runtime() -> Option<&'static Runtime> {
+    RUNTIME
+        .get_or_init(|| Runtime::new().map_err(|err| err.to_string()))
+        .as_ref()
+        .ok()
 }
 
 fn task() -> &'static Mutex<Option<JoinHandle<()>>> {
@@ -40,8 +43,8 @@ pub fn adopt_fd(fd: OwnedFd) -> io::Result<TunQueue> {
 pub async fn read_packets(queue: TunQueue) -> io::Result<()> {
     let mut packet = vec![0u8; 65_535];
     loop {
-        let len = queue.recv(&mut packet).await?;
-        handle_packet(&packet[..len]).await?;
+        let received = queue.recv(&mut packet).await?;
+        handle_packet(received.payload()).await?;
     }
 }
 
@@ -63,9 +66,16 @@ pub unsafe extern "system" fn Java_com_example_tokiotun_TokioTunService_nativeSt
     _this: *mut c_void,
     raw_fd: c_int,
 ) -> u8 {
-    // SAFETY: ParcelFileDescriptor.detachFd() transfers ownership to native code.
+    if raw_fd < 0 {
+        return 0;
+    }
+    // SAFETY: ParcelFileDescriptor.detachFd() transfers ownership to native
+    // code. Take ownership before any early return so every failure path
+    // closes the descriptor.
     let fd = unsafe { OwnedFd::from_raw_fd(raw_fd as RawFd) };
-    let runtime = runtime();
+    let Some(runtime) = runtime() else {
+        return 0;
+    };
     let queue = {
         let _guard = runtime.enter();
         match adopt_fd(fd) {
@@ -79,6 +89,8 @@ pub unsafe extern "system" fn Java_com_example_tokiotun_TokioTunService_nativeSt
         previous.abort();
     }
     *slot = Some(runtime.spawn(async move {
+        // The example discards the task error. A production bridge should
+        // report it to Kotlin and stop the VPN service.
         let _ = read_packets(queue).await;
     }));
     1

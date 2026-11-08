@@ -9,7 +9,7 @@ use tokio_tun::Tun;
 
 #[cfg(target_os = "linux")]
 #[tokio::main]
-async fn main() {
+async fn main() -> std::io::Result<()> {
     let queues = 3;
 
     let tuns = Tun::builder()
@@ -20,11 +20,10 @@ async fn main() {
         .destination(IpAddr::V4(Ipv4Addr::new(10, 1, 0, 1)))
         .broadcast(Ipv4Addr::new(10, 0, 0, 255))
         .queues(queues)
-        .build()
-        .unwrap();
+        .build()?;
 
     println!("--------------");
-    println!("{} tuns created", queues);
+    println!("{queues} tuns created");
     println!("--------------");
 
     println!(
@@ -33,12 +32,12 @@ async fn main() {
         tuns[0].as_raw_fd(),
         tuns[1].as_raw_fd(),
         tuns[2].as_raw_fd(),
-        tuns[0].mtu().unwrap(),
-        tuns[0].flags().unwrap(),
-        tuns[0].address().unwrap(),
-        tuns[0].destination().unwrap(),
-        tuns[0].broadcast().unwrap(),
-        tuns[0].netmask().unwrap(),
+        tuns[0].mtu()?,
+        tuns[0].flags()?,
+        tuns[0].address()?,
+        tuns[0].destination()?,
+        tuns[0].broadcast()?,
+        tuns[0].netmask()?,
     );
 
     println!("---------------------");
@@ -55,12 +54,24 @@ async fn main() {
     let mut buf2 = vec![0u8; 65_535];
 
     loop {
-        let (buf, id) = tokio::select! {
-            Ok(n) = tun0.recv(&mut buf0) => (&buf0[..n], 0),
-            Ok(n) = tun1.recv(&mut buf1) => (&buf1[..n], 1),
-            Ok(n) = tun2.recv(&mut buf2) => (&buf2[..n], 2),
+        let result = tokio::select! {
+            result = tun0.recv(&mut buf0) => (0, result),
+            result = tun1.recv(&mut buf1) => (1, result),
+            result = tun2.recv(&mut buf2) => (2, result),
         };
-        println!("reading {} bytes from tuns[{}]: {:?}", buf.len(), id, buf);
+        let (id, packet) = match result {
+            (id, Ok(packet)) => (id, packet),
+            (id, Err(err)) => {
+                eprintln!("tuns[{id}] receive failed: {err}");
+                return Err(err);
+            }
+        };
+        println!(
+            "reading {} bytes from tuns[{}]: {:?}",
+            packet.len(),
+            id,
+            packet.payload()
+        );
     }
 }
 

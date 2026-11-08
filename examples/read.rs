@@ -9,7 +9,7 @@ use tokio_tun::Tun;
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
 #[tokio::main]
-async fn main() {
+async fn main() -> std::io::Result<()> {
     let tun = Arc::new(
         Tun::builder()
             .name("")
@@ -17,10 +17,7 @@ async fn main() {
             .up()
             .address(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 24)
             .destination(IpAddr::V4(Ipv4Addr::new(10, 1, 0, 1)))
-            .build()
-            .unwrap()
-            .pop()
-            .unwrap(),
+            .build_one()?,
     );
 
     println!("-----------");
@@ -31,11 +28,11 @@ async fn main() {
         "┌ name: {}\n├ fd: {}\n├ mtu: {}\n├ flags: {}\n├ address: {}\n├ destination: {}\n└ netmask: {}",
         tun.name(),
         tun.as_raw_fd(),
-        tun.mtu().unwrap(),
-        tun.flags().unwrap(),
-        tun.address().unwrap(),
-        tun.destination().unwrap(),
-        tun.netmask().unwrap(),
+        tun.mtu()?,
+        tun.flags()?,
+        tun.address()?,
+        tun.destination()?,
+        tun.netmask()?,
     );
 
     println!("---------------------");
@@ -45,8 +42,8 @@ async fn main() {
     // Reader
     let mut buf = vec![0u8; 65_535];
     loop {
-        let n = tun.recv(&mut buf).await.unwrap();
-        println!("reading {} bytes: {:?}", n, &buf[..n]);
+        let packet = tun.recv(&mut buf).await?;
+        println!("reading {} bytes: {:?}", packet.len(), packet.payload());
     }
 }
 

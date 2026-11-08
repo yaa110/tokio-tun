@@ -63,6 +63,16 @@ impl AsRawFd for TunIo {
     }
 }
 
+impl std::os::fd::AsFd for TunIo {
+    fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        match self {
+            // SAFETY: the descriptor is owned and open for the borrow lifetime.
+            Self::Raw(io) => io.as_fd(),
+            Self::Header(io) => unsafe { std::os::fd::BorrowedFd::borrow_raw(io.as_raw_fd()) },
+        }
+    }
+}
+
 impl IntoRawFd for TunIo {
     fn into_raw_fd(self) -> RawFd {
         match self {
@@ -108,6 +118,26 @@ pub fn header_enabled(fd: RawFd) -> bool {
     unsafe { libc::ioctl(fd, crate::freebsd::sys::TUNGIFHEAD, &mut enabled) == 0 && enabled != 0 }
 }
 
+/// Returns whether a TAP descriptor has the unsupported `TAPSVNETHDR` mode
+/// enabled. TUN descriptors reject this ioctl and return `false`.
+pub fn vnet_header_enabled(fd: RawFd) -> bool {
+    let mut enabled: libc::c_int = 0;
+    // SAFETY: `fd` is an open descriptor and TAPGVNETHDR expects an int pointer.
+    unsafe { libc::ioctl(fd, crate::freebsd::sys::TAPGVNETHDR, &mut enabled) == 0 && enabled != 0 }
+}
+
+/// Sets the process that owns a FreeBSD TUN device.
+///
+/// The kernel records the opening process; after a descriptor handoff it still
+/// attributes the device to the original process. `TUNSIFPID` updates that
+/// metadata. TAP descriptors reject the ioctl, so the error is ignored here.
+pub fn set_owner_pid(fd: RawFd) {
+    // SAFETY: `fd` is an open descriptor; TUNSIFPID takes no argument.
+    unsafe {
+        libc::ioctl(fd, crate::freebsd::sys::TUNSIFPID);
+    }
+}
+
 pub struct HeaderTunIo(RawFd);
 
 impl HeaderTunIo {
@@ -146,6 +176,11 @@ impl HeaderTunIo {
             break received as usize;
         };
 
+        if received == 0 {
+            // A zero-length read means the device is gone; surface it as EOF
+            // (empty packet).
+            return Ok(0);
+        }
         if received < HEADER_LEN {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -153,7 +188,12 @@ impl HeaderTunIo {
             ));
         }
         if received == HEADER_LEN {
-            return Ok(0);
+            // A header-only datagram carries no IP payload; the kernel does
+            // not produce zero-payload TUN datagrams.
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "TUN packet has no payload",
+            ));
         }
         if received == HEADER_LEN + buf.len() + 1 {
             return Err(io::Error::new(
@@ -201,10 +241,7 @@ impl HeaderTunIo {
             break sent as usize;
         };
         if sent != HEADER_LEN + buf.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "short TUN write",
-            ));
+            return Err(io::Error::new(io::ErrorKind::WriteZero, "short TUN write"));
         }
         Ok(sent - HEADER_LEN)
     }
@@ -213,7 +250,15 @@ impl HeaderTunIo {
         let Some(family) = packet_family_from_slices(bufs)? else {
             return Ok(0);
         };
-        let payload_len: usize = bufs.iter().map(|buf| buf.len()).sum();
+        let payload_len: usize = bufs
+            .iter()
+            .try_fold(0usize, |total, buf| total.checked_add(buf.len()))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "vectored packet length overflow",
+                )
+            })?;
         let header = [0, 0, 0, family];
         let mut iov = Vec::with_capacity(bufs.len() + 1);
         iov.push(libc::iovec {
@@ -239,10 +284,7 @@ impl HeaderTunIo {
             break sent as usize;
         };
         if sent != HEADER_LEN + payload_len {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "short TUN write",
-            ));
+            return Err(io::Error::new(io::ErrorKind::WriteZero, "short TUN write"));
         }
         Ok(sent - HEADER_LEN)
     }

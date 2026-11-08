@@ -1,7 +1,7 @@
 #[cfg(target_os = "linux")]
 use std::net::{IpAddr, Ipv4Addr};
 #[cfg(target_os = "linux")]
-use tokio_tun::{Tun, VIRTIO_NET_HDR_LEN, VirtioNetHeader};
+use tokio_tun::Tun;
 
 /// Set this to `true` to enable offload. Offload must be enabled consistently
 /// on the initial queue and on every attached queue.
@@ -10,7 +10,7 @@ const ENABLE_OFFLOAD: bool = false;
 
 #[cfg(target_os = "linux")]
 #[tokio::main]
-async fn main() {
+async fn main() -> std::io::Result<()> {
     // `queues(1)` opens the interface in multi-queue mode. The first queue
     // supplies the address configuration; later queues only attach to it.
     let mut first_builder = Tun::builder()
@@ -24,7 +24,10 @@ async fn main() {
         first_builder = first_builder.offload();
     }
 
-    let first = first_builder.build().unwrap().pop().unwrap();
+    let first = first_builder
+        .build()?
+        .pop()
+        .expect("queues(1) returns exactly one queue");
     let name = first.name().to_owned();
 
     println!("created multi-queue interface {name}");
@@ -36,7 +39,10 @@ async fn main() {
     if ENABLE_OFFLOAD {
         second_builder = second_builder.offload();
     }
-    let second = second_builder.build().unwrap().pop().unwrap();
+    let second = second_builder
+        .build()?
+        .pop()
+        .expect("queues(1) returns exactly one queue");
 
     println!(
         "queue 0 fd={}, queue 1 fd={}",
@@ -46,7 +52,7 @@ async fn main() {
     println!("send traffic to 10.1.0.1 to exercise the queues");
 
     let header_len = if ENABLE_OFFLOAD {
-        VIRTIO_NET_HDR_LEN
+        first.vnet_hdr_len()
     } else {
         0
     };
@@ -54,21 +60,27 @@ async fn main() {
     let mut second_buf = vec![0u8; header_len + 65_536];
 
     loop {
-        let (queue, n, buffer) = tokio::select! {
-            Ok(n) = first.recv(&mut first_buf) => (0, n, &first_buf[..n]),
-            Ok(n) = second.recv(&mut second_buf) => (1, n, &second_buf[..n]),
+        let result = tokio::select! {
+            result = first.recv(&mut first_buf) => (0, result),
+            result = second.recv(&mut second_buf) => (1, result),
+        };
+        let (queue, packet) = match result {
+            (queue, Ok(packet)) => (queue, packet),
+            (queue, Err(err)) => {
+                eprintln!("queue {queue} receive failed: {err}");
+                return Err(err);
+            }
         };
 
         if header_len != 0 {
-            let header = VirtioNetHeader::decode(&buffer[..header_len]).unwrap();
+            let header = packet.offload_header().unwrap_or_default();
             println!(
-                "queue {queue}: {} byte packet, gso_type={}, payload={} bytes",
-                n,
-                header.gso_type,
-                n - header_len
+                "queue {queue}: {} byte payload, gso_type={}",
+                packet.len(),
+                header.gso_type
             );
         } else {
-            println!("queue {queue}: {n} byte packet");
+            println!("queue {queue}: {} byte packet", packet.len());
         }
     }
 }

@@ -33,6 +33,12 @@ pub struct In6AliasReq {
     pub ifra_vhid: c_int,
 }
 
+// The ioctl request codes embed the struct sizes below; struct drift must
+// fail at compile time, not as a kernel-side `copyin` shortage.
+const _: () = assert!(size_of::<IfAliasReq>() == 68);
+const _: () = assert!(size_of::<In6AliasReq>() == 136);
+const _: () = assert!(size_of::<libc::ifreq>() == 32);
+
 const IOC_IN: c_ulong = 0x8000_0000;
 const IOC_OUT: c_ulong = 0x4000_0000;
 const IOC_INOUT: c_ulong = 0xc000_0000;
@@ -51,6 +57,8 @@ pub const SIOCIFCREATE2: c_ulong = ioctl_req(IOC_INOUT, b'i', 124, size_of::<lib
 pub const SIOCAIFADDR: c_ulong = ioctl_req(IOC_IN, b'i', 43, size_of::<IfAliasReq>());
 pub const SIOCAIFADDR_IN6: c_ulong = ioctl_req(IOC_IN, b'i', 27, size_of::<In6AliasReq>());
 pub const TUNGIFNAME: c_ulong = ioctl_req(IOC_OUT, b't', 93, size_of::<libc::ifreq>());
+pub const TAPGVNETHDR: c_ulong = ioctl_req(IOC_OUT, b't', 94, size_of::<c_int>());
+pub const TUNSIFPID: c_ulong = ioctl_req(0, b't', 95, 0);
 pub const TUNSIFHEAD: c_ulong = ioctl_req(IOC_IN, b't', 96, size_of::<c_int>());
 pub const TUNGIFHEAD: c_ulong = ioctl_req(IOC_OUT, b't', 97, size_of::<c_int>());
 pub const TUNSTRANSIENT: c_ulong = ioctl_req(IOC_IN, b't', 98, size_of::<c_int>());

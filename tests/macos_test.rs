@@ -10,6 +10,7 @@ use tokio_tun::{Tun, TunQueue};
 
 macro_rules! require_root {
     () => {
+        // SAFETY: geteuid has no preconditions.
         if unsafe { libc::geteuid() } != 0 {
             if std::env::var_os("TOKIO_TUN_REQUIRE_PRIVILEGED").is_some() {
                 panic!("macOS utun tests require root");
@@ -20,6 +21,7 @@ macro_rules! require_root {
     };
 }
 
+#[ignore = "requires root/CAP_NET_ADMIN"]
 #[tokio::test]
 async fn test_macos_utun_device() {
     require_root!();
@@ -38,6 +40,7 @@ async fn test_macos_utun_device() {
     assert!(tun.as_raw_fd() > 0);
 }
 
+#[ignore = "requires root/CAP_NET_ADMIN"]
 #[tokio::test]
 async fn test_macos_utun_queue_conversion() {
     require_root!();
@@ -49,6 +52,7 @@ async fn test_macos_utun_queue_conversion() {
 
     let queue: TunQueue = tun.into();
     assert_eq!(queue.as_raw_fd(), fd);
+    // SAFETY: `fd` is an open descriptor and F_GETFL only reads status flags.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
     assert!(flags >= 0);
     assert_ne!(flags & libc::O_NONBLOCK, 0);
@@ -58,6 +62,7 @@ async fn test_macos_utun_queue_conversion() {
     assert!(index > 0);
 }
 
+#[ignore = "requires root/CAP_NET_ADMIN"]
 #[tokio::test]
 async fn test_macos_utun_ipv4_address() {
     require_root!();
@@ -90,6 +95,7 @@ async fn test_macos_utun_ipv4_address() {
     }));
 }
 
+#[ignore = "requires root/CAP_NET_ADMIN"]
 #[tokio::test]
 async fn test_macos_utun_ipv4_address_without_destination() {
     require_root!();
@@ -110,6 +116,7 @@ async fn test_macos_utun_ipv4_address_without_destination() {
     assert_eq!(tun.netmask().unwrap(), Ipv4Addr::new(255, 255, 255, 0));
 }
 
+#[ignore = "requires root/CAP_NET_ADMIN"]
 #[tokio::test]
 async fn test_macos_utun_packet_io() {
     require_root!();
@@ -133,12 +140,13 @@ async fn test_macos_utun_packet_io() {
     while start.elapsed() < StdDuration::from_secs(3) {
         socket.send_to(payload, "10.202.0.2:7777").await.unwrap();
 
-        if let Ok(Ok(n)) = timeout(Duration::from_millis(300), tun.recv(&mut buffer)).await
-            && buffer[..n]
+        if let Ok(Ok(packet)) = timeout(Duration::from_millis(300), tun.recv(&mut buffer)).await
+            && packet
+                .payload()
                 .windows(payload.len())
                 .any(|window| window == payload)
         {
-            received = Some(n);
+            received = Some(packet.len());
             break;
         }
     }
@@ -151,9 +159,42 @@ async fn test_macos_utun_packet_io() {
 
     let (first, second) = packet.split_at(8);
     let bufs = [IoSlice::new(first), IoSlice::new(second)];
-    assert_eq!(tun.sendv(&bufs).await.unwrap(), n);
+    tun.sendv(&bufs).await.unwrap();
+    tun.try_sendv(&bufs).unwrap();
 }
 
+/// Exercises the synchronous `try_*` forms on a quiet utun device.
+#[ignore = "requires root/CAP_NET_ADMIN"]
+#[tokio::test]
+async fn test_macos_utun_try_io() {
+    require_root!();
+
+    let tun = Tun::builder()
+        .name("")
+        .address("10.207.0.1".parse().unwrap(), 24)
+        .destination("10.207.0.2".parse().unwrap())
+        .up()
+        .build()
+        .unwrap()
+        .pop()
+        .unwrap();
+
+    // A freshly created quiet utun queue has nothing pending. Other system
+    // traffic for the subnet is not expected, so try_recv reports
+    // `WouldBlock` (or a zero-length close packet in the rare teardown case).
+    let mut buffer = [0u8; 1500];
+    match tun.try_recv(&mut buffer) {
+        Err(err) => {
+            assert_eq!(err.kind(), std::io::ErrorKind::WouldBlock);
+        }
+        Ok(packet) => assert!(packet.is_empty(), "unexpected quiet-device packet"),
+    }
+
+    let packet = [0x45u8; 20];
+    tun.try_send(&packet).unwrap();
+}
+
+#[ignore = "requires root/CAP_NET_ADMIN"]
 #[tokio::test]
 async fn test_macos_utun_ipv6_address() {
     require_root!();
@@ -176,6 +217,7 @@ async fn test_macos_utun_ipv6_address() {
     );
 }
 
+#[ignore = "requires root/CAP_NET_ADMIN"]
 #[tokio::test]
 async fn test_macos_utun_ipv6_point_to_point() {
     require_root!();
@@ -205,7 +247,7 @@ async fn test_macos_utun_ipv6_point_to_point() {
 
     match tun.destination() {
         Ok(reported) => assert_eq!(reported, destination),
-        Err(tokio_tun::Error::IoError(err)) => {
+        Err(err) => {
             assert_eq!(err.kind(), std::io::ErrorKind::AddrNotAvailable)
         }
     }

@@ -7,6 +7,7 @@ pub struct TunIo(RawFd);
 
 impl FromRawFd for TunIo {
     unsafe fn from_raw_fd(fd: RawFd) -> Self {
+        // SAFETY: the caller transfers ownership of `fd` to the returned value.
         Self(fd)
     }
 }
@@ -22,6 +23,13 @@ impl IntoRawFd for TunIo {
 impl AsRawFd for TunIo {
     fn as_raw_fd(&self) -> RawFd {
         self.0
+    }
+}
+
+impl std::os::fd::AsFd for TunIo {
+    fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        // SAFETY: `self.0` is an owned open descriptor.
+        unsafe { std::os::fd::BorrowedFd::borrow_raw(self.0) }
     }
 }
 
@@ -80,6 +88,11 @@ impl TunIo {
             }
             break received as usize;
         };
+        if received == 0 {
+            // A zero-length read means the `utun` control connection ended;
+            // surface it as EOF (empty packet).
+            return Ok(0);
+        }
         if received < HEADER_LEN {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -87,7 +100,12 @@ impl TunIo {
             ));
         }
         if received == HEADER_LEN {
-            return Ok(0);
+            // A header-only datagram carries no IP payload; the kernel does
+            // not produce zero-payload `utun` datagrams.
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "utun packet has no payload",
+            ));
         }
         if message.msg_flags & libc::MSG_TRUNC != 0 {
             return Err(io::Error::new(
@@ -141,10 +159,7 @@ impl TunIo {
             break sent as usize;
         };
         if sent != HEADER_LEN + buf.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "short utun write",
-            ));
+            return Err(io::Error::new(io::ErrorKind::WriteZero, "short utun write"));
         }
         Ok(sent - HEADER_LEN)
     }
@@ -154,7 +169,15 @@ impl TunIo {
             Some(family) => family,
             None => return Ok(0),
         };
-        let payload_len: usize = bufs.iter().map(|buf| buf.len()).sum();
+        let payload_len: usize = bufs
+            .iter()
+            .try_fold(0usize, |total, buf| total.checked_add(buf.len()))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "vectored packet length overflow",
+                )
+            })?;
         let header = [0, 0, 0, family];
         let mut iov = Vec::with_capacity(bufs.len() + 1);
         iov.push(libc::iovec {
@@ -184,10 +207,7 @@ impl TunIo {
             break sent as usize;
         };
         if sent != HEADER_LEN + payload_len {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "short utun write",
-            ));
+            return Err(io::Error::new(io::ErrorKind::WriteZero, "short utun write"));
         }
         Ok(sent - HEADER_LEN)
     }
@@ -233,6 +253,8 @@ mod tests {
 
     fn socket_pair() -> (TunIo, TunIo) {
         let mut fds = [0i32; 2];
+        // SAFETY: `fds` is writable for two descriptors and the arguments are
+        // valid for an AF_UNIX datagram socket pair.
         let result =
             unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_DGRAM, 0, fds.as_mut_ptr()) };
         assert_eq!(

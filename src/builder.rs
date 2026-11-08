@@ -1,4 +1,3 @@
-use crate::Result;
 use crate::address::AddressConfig;
 #[cfg(target_os = "freebsd")]
 use crate::freebsd::params::Params;
@@ -6,18 +5,41 @@ use crate::freebsd::params::Params;
 use crate::linux::params::Params;
 #[cfg(target_os = "macos")]
 use crate::macos::params::Params;
+#[cfg(target_os = "linux")]
+use crate::offload::SUPPORTED_OFFLOAD_FEATURES;
 use crate::tun::Tun;
 #[cfg(target_os = "linux")]
+use crate::{
+    DEFAULT_OFFLOAD_FEATURES, TUN_F_CSUM, TUN_F_TSO_ECN, TUN_F_TSO4, TUN_F_TSO6, TUN_F_USO4,
+    TUN_F_USO6,
+};
+#[cfg(target_os = "linux")]
 use libc::{IFF_NO_PI, IFF_TAP, IFF_TUN};
+use std::io;
 use std::net::IpAddr;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use std::net::Ipv4Addr;
 
-const MAX_INTERFACE_NAME_LEN: usize = 15;
+/// Maximum interface name length (`IFNAMSIZ - 1`); shared by the builder and
+/// every platform backend so the limit can never drift apart.
+pub(crate) const MAX_INTERFACE_NAME_LEN: usize = 15;
 #[cfg(target_os = "linux")]
 const MAX_QUEUES: usize = 256;
 
-/// Represents a factory to build new instances of [`Tun`](struct.Tun.html).
+/// Represents a factory to build new instances of [`Tun`].
+///
+/// A builder is consumed by [`build`](TunBuilder::build). Builder-level
+/// validation happens before allocation; kernel-dependent validation can still
+/// fail while the device is configured, and transient devices are cleaned up.
+/// The packet methods delegate directly to the internal `TunQueue`; `Tun`
+/// adds no separate packet path, so both types share the same cancellation and
+/// truncation semantics documented there.
+///
+/// Platform-specific methods are only present on the platforms that support
+/// them. TAP and persistence are available on Linux and FreeBSD; multi-queue,
+/// packet information, owner/group, and offload are Linux-only.
+#[must_use = "a `TunBuilder` does nothing until its `build` method is called"]
+#[derive(Debug)]
 pub struct TunBuilder {
     name: String,
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -25,19 +47,24 @@ pub struct TunBuilder {
     #[cfg(target_os = "linux")]
     packet_info: bool,
     #[cfg(target_os = "linux")]
-    offload: bool,
+    offload: Option<u32>,
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     persist: bool,
     up: bool,
     mtu: Option<i32>,
     #[cfg(target_os = "linux")]
-    owner: Option<i32>,
+    owner: Option<u32>,
     #[cfg(target_os = "linux")]
-    group: Option<i32>,
+    group: Option<u32>,
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     mac_address: Option<[u8; 6]>,
     addresses: Vec<AddressConfig>,
     invalid_reason: Option<&'static str>,
+    /// Validation failures for individual addresses, recorded by
+    /// `destination`/`broadcast`. Failures stay attached to the address they
+    /// belong to, so an unrelated later call cannot clear them; only a
+    /// successful call affecting the same address replaces its reason.
+    address_errors: Vec<Option<&'static str>>,
     #[cfg(target_os = "linux")]
     queues: Option<usize>,
     cloexec: bool,
@@ -60,11 +87,12 @@ impl Default for TunBuilder {
             #[cfg(target_os = "linux")]
             packet_info: false,
             #[cfg(target_os = "linux")]
-            offload: false,
+            offload: None,
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             mac_address: None,
             addresses: Vec::new(),
             invalid_reason: None,
+            address_errors: Vec::new(),
             #[cfg(target_os = "linux")]
             queues: None,
             cloexec: true,
@@ -83,11 +111,16 @@ impl TunBuilder {
     /// Names longer than 15 bytes or containing a NUL byte cause
     /// [`build`](TunBuilder::build) to return an error.
     ///
-    /// On macOS, only an empty name, `utun`, and `utunN` are supported.
-    /// On FreeBSD, use an empty name, `tunN` for TUN, or `tapN` together with
-    /// `tap()` for TAP. A pre-existing named interface is attached to without
-    /// changing whether it is transient unless `persist()`
-    /// is used.
+    /// On Linux, a non-empty name creates a new TUN/TAP device or attaches to
+    /// an existing persistent device with that name; an already-open
+    /// non-persistent name returns `EBUSY`. On macOS, only an empty name,
+    /// `utun`, and `utunN` are supported. On FreeBSD, use an empty name, `tunN`
+    /// for TUN, or `tapN` together with `tap()` for TAP. A pre-existing named
+    /// interface is attached to without changing whether it is transient
+    /// unless `persist()` is used. Note that FreeBSD TUN header mode
+    /// (`TUNSIFHEAD`) is a property of the device, not the open descriptor:
+    /// attaching to a persistent `tunN` switches it to four-byte family
+    /// headers for subsequently created descriptors as well.
     pub fn name(mut self, name: &str) -> Self {
         self.name = name.into();
         self
@@ -130,6 +163,11 @@ impl TunBuilder {
     ///
     /// If you don't need this kind of information, you do not need to set this option. In this
     /// case, only raw packets (whatever they may be) are received.
+    ///
+    /// This crate does not strip or synthesize the prefix: [`Packet::payload`](crate::Packet::payload)
+    /// includes the 4 bytes, and `send`/`sendv` expect them in the packet. Use
+    /// [`Tun::packet_info`](crate::Tun::packet_info) or
+    /// [`TunQueue::packet_info`](crate::TunQueue::packet_info) to detect the mode.
     #[cfg(target_os = "linux")]
     pub fn packet_info(mut self) -> Self {
         self.packet_info = true;
@@ -151,27 +189,68 @@ impl TunBuilder {
     /// Enables Linux TUN/TAP offloads (TSO/GSO/GRO) using the virtio net
     /// header.
     ///
-    /// This sets `IFF_VNET_HDR`, `IFF_NAPI`, configures checksum and TCP
-    /// segmentation offloads, and sets the virtio header size to
-    /// [`VIRTIO_NET_HDR_LEN`](crate::VIRTIO_NET_HDR_LEN). NAPI enables GRO for
-    /// packets written from userspace into the kernel; it does not coalesce
-    /// packets delivered to userspace.
+    /// This sets `IFF_VNET_HDR`, `IFF_NAPI`, configures
+    /// [`DEFAULT_OFFLOAD_FEATURES`](crate::DEFAULT_OFFLOAD_FEATURES)
+    /// (checksum, IPv4 TSO, IPv6 TSO, and TSO ECN), and sets the virtio header
+    /// size to [`VIRTIO_NET_HDR_LEN`](crate::VIRTIO_NET_HDR_LEN). NAPI enables
+    /// GRO for packets written from userspace into the kernel; it does not
+    /// coalesce packets delivered to userspace.
     ///
-    /// Every packet read from the device then starts with a
-    /// [`VirtioNetHeader`](crate::VirtioNetHeader), and every packet written to
-    /// it must include that header. The header carries GSO and checksum
-    /// metadata in both directions. Callers are responsible for preserving and
-    /// interpreting that metadata. Size receive buffers for at least
-    /// `VIRTIO_NET_HDR_LEN + 65_536` bytes because GSO packets can exceed the
-    /// interface MTU.
+    /// `recv` then returns a [`Packet`](crate::Packet) with the parsed
+    /// [`VirtioNetHeader`](crate::VirtioNetHeader) and payload; the raw
+    /// descriptor still carries the header on the wire. `send` writes the
+    /// header carried by a `Packet`, or a zero header for a payload slice. The
+    /// header carries GSO and checksum metadata in both directions. Callers are
+    /// responsible for interpreting that metadata. Size receive buffers for the
+    /// header plus 65,536 bytes because GSO packets can exceed the interface
+    /// MTU; [`Tun::vnet_hdr_len`](crate::Tun::vnet_hdr_len) reports the header
+    /// size.
     ///
     /// When attaching another queue to an existing multi-queue device, call
-    /// `offload()` on that attach too. An offload-state mismatch is rejected.
+    /// `offload()` or the same `offload_features()` on that attach too. The
+    /// kernel exposes whether the virtio header is enabled, so an on/off
+    /// mismatch is rejected. It does not expose the current feature mask, so
+    /// the caller must keep the feature mask consistent across attaches;
+    /// `TUNSETOFFLOAD` is device-wide.
     ///
     /// This is mutually exclusive with `packet_info`.
+    ///
+    /// Use [`offload_features`](TunBuilder::offload_features) to select a
+    /// different feature mask, for example to opt into USO on kernels that
+    /// support it.
     #[cfg(target_os = "linux")]
     pub fn offload(mut self) -> Self {
-        self.offload = true;
+        self.offload = Some(DEFAULT_OFFLOAD_FEATURES);
+        self
+    }
+
+    /// Enables Linux virtio-net offloads with an explicit feature mask.
+    ///
+    /// `features` is a bitwise OR of [`TUN_F_CSUM`](crate::TUN_F_CSUM),
+    /// [`TUN_F_TSO4`](crate::TUN_F_TSO4), [`TUN_F_TSO6`](crate::TUN_F_TSO6),
+    /// [`TUN_F_TSO_ECN`](crate::TUN_F_TSO_ECN),
+    /// [`TUN_F_USO4`](crate::TUN_F_USO4), and
+    /// [`TUN_F_USO6`](crate::TUN_F_USO6).
+    ///
+    /// `TUN_F_CSUM` is required whenever any other feature is requested.
+    /// `TUN_F_USO4` and `TUN_F_USO6` must be requested together, and
+    /// `TUN_F_TSO_ECN` requires `TUN_F_TSO4` or `TUN_F_TSO6`.
+    /// [`build`](TunBuilder::build) rejects masks that violate these rules and
+    /// masks containing unsupported bits. Features that the running kernel does
+    /// not support are reported by `TUNSETOFFLOAD` (normally `EINVAL`).
+    ///
+    /// UDP-tunnel GSO is not supported in 1.0: Linux requires a 24-byte
+    /// `virtio_net_hdr_v1_hash_tunnel`, while this crate exposes the 10-byte
+    /// virtio-net header. `TUN_F_UFO` is deprecated and is not supported.
+    ///
+    /// Passing `0` enables the virtio-net header with no offload features.
+    /// This is useful for callers that only want a stable header prefix.
+    ///
+    /// This is mutually exclusive with `packet_info`, and replaces any previous
+    /// `offload()`/`offload_features()` call.
+    #[cfg(target_os = "linux")]
+    pub fn offload_features(mut self, features: u32) -> Self {
+        self.offload = Some(features);
         self
     }
 
@@ -179,7 +258,7 @@ impl TunBuilder {
     ///
     /// This is the numeric UID of the user who will own the created device.
     #[cfg(target_os = "linux")]
-    pub fn owner(mut self, owner: i32) -> Self {
+    pub fn owner(mut self, owner: u32) -> Self {
         self.owner = Some(owner);
         self
     }
@@ -188,7 +267,7 @@ impl TunBuilder {
     ///
     /// This is the numeric GID of the group that will own the created device.
     #[cfg(target_os = "linux")]
-    pub fn group(mut self, group: i32) -> Self {
+    pub fn group(mut self, group: u32) -> Self {
         self.group = Some(group);
         self
     }
@@ -214,6 +293,11 @@ impl TunBuilder {
     /// most `128` for IPv6 addresses. Prefix length `0` and unspecified,
     /// loopback, multicast, or broadcast addresses are rejected.
     ///
+    /// `std::net::Ipv6Addr` does not carry a scope ID. Link-local IPv6
+    /// addresses are configured on the interface without an additional scope;
+    /// applications that need a non-zero scope ID must use the platform
+    /// directly.
+    ///
     /// ```no_run
     /// use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     /// use tokio_tun::Tun;
@@ -234,6 +318,11 @@ impl TunBuilder {
             destination: None,
             broadcast: None,
         });
+        self.address_errors.push(None);
+        // Do not clear `invalid_reason`: a `destination`/`broadcast` call made
+        // without a preceding address must still make `build` fail, as its
+        // documentation promises. Silently attaching it to a later address
+        // would hide a real configuration mistake.
         self
     }
 
@@ -264,15 +353,24 @@ impl TunBuilder {
     ///     .unwrap();
     /// ```
     pub fn destination(mut self, destination: IpAddr) -> Self {
-        if let Some(config) = self.addresses.last_mut() {
-            if config.address.is_ipv4() == destination.is_ipv4() {
-                config.destination = Some(destination);
-            } else {
-                self.invalid_reason =
-                    Some("destination address family must match the most recently added address");
+        match self.addresses.last_mut() {
+            Some(config) => {
+                let reason = if config.address.is_ipv4() == destination.is_ipv4() {
+                    config.destination = Some(destination);
+                    None
+                } else {
+                    Some("destination address family must match the most recently added address")
+                };
+                // Replace this address's failure only; earlier addresses keep
+                // their recorded reasons.
+                *self
+                    .address_errors
+                    .last_mut()
+                    .expect("address_errors tracks every address") = reason;
             }
-        } else {
-            self.invalid_reason = Some("destination requires a preceding address");
+            None => {
+                self.invalid_reason = Some("destination requires a preceding address");
+            }
         }
         self
     }
@@ -283,19 +381,31 @@ impl TunBuilder {
     /// be an IPv4 address. Call [`address`](TunBuilder::address) before this
     /// method; otherwise [`build`](TunBuilder::build) returns an error.
     ///
-    /// On FreeBSD this applies to the most recently added IPv4 address, like
-    /// Linux. Only TAP supports it, and [`Tun::broadcast`](crate::Tun::broadcast)
-    /// reports the primary/first IPv4 address's broadcast.
+    /// On Linux this applies to TUN and TAP devices; TUN devices are
+    /// point-to-point, so a broadcast address is recorded but normally has no
+    /// routing effect. On FreeBSD only TAP supports it, and
+    /// [`Tun::broadcast`](crate::Tun::broadcast) reports the primary/first IPv4
+    /// address's broadcast.
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     pub fn broadcast(mut self, broadcast: Ipv4Addr) -> Self {
-        if let Some(config) = self.addresses.last_mut() {
-            if config.address.is_ipv4() {
-                config.broadcast = Some(broadcast);
-            } else {
-                self.invalid_reason = Some("broadcast requires a preceding IPv4 address");
+        match self.addresses.last_mut() {
+            Some(config) => {
+                let reason = if config.address.is_ipv4() {
+                    config.broadcast = Some(broadcast);
+                    None
+                } else {
+                    Some("broadcast requires a preceding IPv4 address")
+                };
+                // Replace this address's failure only; earlier addresses keep
+                // their recorded reasons.
+                *self
+                    .address_errors
+                    .last_mut()
+                    .expect("address_errors tracks every address") = reason;
             }
-        } else {
-            self.invalid_reason = Some("broadcast requires a preceding address");
+            None => {
+                self.invalid_reason = Some("broadcast requires a preceding address");
+            }
         }
         self
     }
@@ -311,6 +421,11 @@ impl TunBuilder {
     /// Adds CLOEXEC flag on all FDs. This will prevent passing FDs to any exec-ed
     /// child processes.
     /// Default behaviour is to prevent passing fds flag.
+    ///
+    /// On macOS there is no atomic `SOCK_CLOEXEC` path for the utun/control
+    /// sockets; the flag is set immediately after `socket(2)`. A concurrent
+    /// `fork`/`exec` in another thread could inherit the descriptor in that
+    /// brief window.
     pub fn close_on_exec(mut self) -> Self {
         self.cloexec = true;
         self
@@ -318,9 +433,10 @@ impl TunBuilder {
 
     /// Makes the device persistent.
     ///
-    /// On Linux, persistent devices stay registered as long as the computer is
-    /// not restarted. If another device with the same name is created
-    /// afterwards, it will override the existing one. On FreeBSD, this removes
+    /// On Linux, persistent devices stay registered until explicitly removed
+    /// (for example with `TUNSETPERSIST` set to 0) or the machine reboots.
+    /// Opening a persistent name attaches to the existing device rather than
+    /// creating a second interface with the same name. On FreeBSD, this removes
     /// transient mode so the interface identity survives its last descriptor
     /// being closed. FreeBSD clears addresses and the up state when the last
     /// descriptor closes; they must be configured again after reattaching.
@@ -341,14 +457,25 @@ impl TunBuilder {
         self
     }
 
-    /// Builds a new instance of [`Tun`](struct.Tun.html).
+    /// Builds one or more [`Tun`] instances, one per queue.
     ///
-    /// This method must be called from within a Tokio runtime with I/O enabled.
+    /// Builder-level validation happens before allocation. Kernel-dependent
+    /// validation (MTU ranges, address conflicts, unsupported offload masks)
+    /// can still fail while the device is configured; transient devices are
+    /// cleaned up on failure. On Linux, a builder configured with `queues`
+    /// returns exactly that many queues; otherwise it returns one. For a
+    /// single-queue device, the returned vector has exactly one element.
     ///
     /// On macOS, invalid interface names and IPv6 destinations without a
     /// `/128` prefix return an error. On FreeBSD, names must be empty, `tunN`,
     /// or `tapN`.
-    pub fn build(self) -> Result<Vec<Tun>> {
+    ///
+    /// # Panics
+    ///
+    /// This method must be called from within a Tokio runtime with I/O enabled.
+    /// It panics if Tokio's `AsyncFd` registration cannot find a runtime,
+    /// matching [`TunQueue::new`](crate::TunQueue::new).
+    pub fn build(self) -> io::Result<Vec<Tun>> {
         self.validate()?;
         #[cfg(target_os = "linux")]
         if let Some(queues) = self.queues {
@@ -357,46 +484,123 @@ impl TunBuilder {
         Tun::new(self.into()).map(|tun| vec![tun])
     }
 
-    fn validate(&self) -> Result<()> {
+    /// Builds exactly one [`Tun`] queue.
+    ///
+    /// This is the convenience form of [`build`](TunBuilder::build) for the
+    /// common single-queue case. It returns an error instead of allocating and
+    /// then discarding extra queues when `queues` was called, which makes the
+    /// `build()?.pop().expect(...)` pattern unnecessary.
+    ///
+    /// # Panics
+    ///
+    /// This method must be called from within a Tokio runtime with I/O enabled.
+    /// It panics if Tokio's `AsyncFd` registration cannot find a runtime,
+    /// matching [`TunQueue::new`](crate::TunQueue::new).
+    pub fn build_one(self) -> io::Result<Tun> {
+        #[cfg(target_os = "linux")]
+        if self.queues.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "build_one requires a single-queue builder; use build() for multi-queue devices",
+            ));
+        }
+        let mut tuns = self.build()?;
+        match tuns.pop() {
+            Some(tun) if tuns.is_empty() => Ok(tun),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "expected exactly one queue",
+            )),
+        }
+    }
+
+    fn validate(&self) -> io::Result<()> {
         #[cfg(target_os = "macos")]
         self.validate_macos()?;
         #[cfg(target_os = "freebsd")]
         self.validate_freebsd()?;
 
         if let Some(reason) = self.invalid_reason {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, reason).into());
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                reason,
+            ));
+        }
+        if let Some(reason) = self.address_errors.iter().flatten().copied().next() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                reason,
+            ));
+        }
+        if let Some(mtu) = self.mtu {
+            // Kernels reject non-positive MTUs (FreeBSD bounds SIOCSIFMTU
+            // through `ifhwioctl`, macOS returns `EINVAL`); validating
+            // client-side gives one consistent error kind and avoids failing
+            // mid-configuration on kernels without a clamp.
+            if mtu <= 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "mtu must be positive",
+                ));
+            }
         }
         if !self.name.is_empty() {
             if self.name.len() > MAX_INTERFACE_NAME_LEN {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     "interface name must not exceed 15 bytes",
-                )
-                .into());
+                ));
             }
             if self.name.contains('\0') {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     "interface name must not contain a NUL byte",
-                )
-                .into());
+                ));
             }
         }
         #[cfg(target_os = "linux")]
         {
-            if self.offload && self.packet_info {
+            if self.offload.is_some() && self.packet_info {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     "offload and packet_info cannot be enabled together",
-                )
-                .into());
+                ));
+            }
+            if let Some(features) = self.offload
+                && features != 0
+            {
+                if features & TUN_F_CSUM == 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "TUN_F_CSUM is required when enabling Linux offload features",
+                    ));
+                }
+                if features & !SUPPORTED_OFFLOAD_FEATURES != 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "unsupported Linux offload feature bits; UDP-tunnel GSO requires a \
+                         24-byte header and TUN_F_UFO is deprecated",
+                    ));
+                }
+                let uso = features & (TUN_F_USO4 | TUN_F_USO6);
+                if uso != 0 && uso != (TUN_F_USO4 | TUN_F_USO6) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "TUN_F_USO4 and TUN_F_USO6 must be requested together",
+                    ));
+                }
+                if features & TUN_F_TSO_ECN != 0 && features & (TUN_F_TSO4 | TUN_F_TSO6) == 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "TUN_F_TSO_ECN requires TUN_F_TSO4 or TUN_F_TSO6",
+                    ));
+                }
             }
             if matches!(self.queues, Some(queues) if queues == 0 || queues > MAX_QUEUES) {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     "queues must be between 1 and 256",
-                )
-                .into());
+                ));
             }
         }
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -405,8 +609,7 @@ impl TunBuilder {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     "MAC address is only supported for TAP devices",
-                )
-                .into());
+                ));
             }
             crate::address::validate_mac(mac)
                 .map_err(|reason| std::io::Error::new(std::io::ErrorKind::InvalidInput, reason))?;
@@ -420,7 +623,7 @@ impl TunBuilder {
     }
 
     #[cfg(target_os = "freebsd")]
-    fn validate_freebsd(&self) -> Result<()> {
+    fn validate_freebsd(&self) -> io::Result<()> {
         if !self.name.is_empty() {
             let prefix = if self.is_tap { "tap" } else { "tun" };
             let suffix = self.name.strip_prefix(prefix).unwrap_or("");
@@ -431,8 +634,7 @@ impl TunBuilder {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     "FreeBSD interface names must be empty, tunN, or tapN",
-                )
-                .into());
+                ));
             }
         }
         if !self.is_tap
@@ -444,8 +646,7 @@ impl TunBuilder {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "broadcast addresses are not supported for FreeBSD TUN devices",
-            )
-            .into());
+            ));
         }
         if self.is_tap
             && self
@@ -456,8 +657,7 @@ impl TunBuilder {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "destination addresses are not supported for FreeBSD TAP devices",
-            )
-            .into());
+            ));
         }
         if !self.is_tap
             && self.addresses.iter().any(|address| {
@@ -469,14 +669,13 @@ impl TunBuilder {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "FreeBSD TUN requires IPv6 destinations to use a /128 prefix",
-            )
-            .into());
+            ));
         }
         Ok(())
     }
 
     #[cfg(target_os = "macos")]
-    fn validate_macos(&self) -> Result<()> {
+    fn validate_macos(&self) -> io::Result<()> {
         if self
             .addresses
             .iter()
@@ -485,8 +684,7 @@ impl TunBuilder {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "broadcast addresses are not supported on macOS utun devices",
-            )
-            .into());
+            ));
         }
         if self.addresses.iter().any(|address| {
             address.address.is_ipv6() && address.destination.is_some() && address.prefix_len != 128
@@ -494,15 +692,13 @@ impl TunBuilder {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "macOS utun requires IPv6 destinations to use a /128 prefix",
-            )
-            .into());
+            ));
         }
         if !self.name.is_empty() && crate::macos::params::parse_utun_name(&self.name).is_none() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "interface names on macOS must be empty, \"utun\", or \"utun<N>\"",
-            )
-            .into());
+            ));
         }
         Ok(())
     }
@@ -526,6 +722,7 @@ impl From<TunBuilder> for Params {
                 flags
             },
             offload: builder.offload,
+            packet_info: builder.packet_info,
             persist: builder.persist,
             up: builder.up,
             mtu: builder.mtu,
@@ -574,6 +771,8 @@ impl From<TunBuilder> for Params {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
+    use crate::{TUN_F_TSO_ECN, TUN_F_TSO4, TUN_F_USO4, TUN_F_USO6};
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     fn v4(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
@@ -584,9 +783,9 @@ mod tests {
         IpAddr::V6(address.parse::<Ipv6Addr>().unwrap())
     }
 
-    fn assert_invalid_input<T>(result: Result<T>) {
+    fn assert_invalid_input<T>(result: io::Result<T>) {
         match result {
-            Err(crate::Error::IoError(err)) => {
+            Err(err) => {
                 assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput)
             }
             Ok(_) => panic!("expected an error"),
@@ -652,8 +851,70 @@ mod tests {
     }
 
     #[test]
+    fn a_later_success_does_not_clear_an_earlier_destination_failure() {
+        assert_invalid_input(
+            TunBuilder::new()
+                .address(v4(10, 0, 0, 1), 24)
+                // Records a family failure for the first address.
+                .destination(v6("fd00::2"))
+                // An unrelated later success must not erase it.
+                .address(v6("fd00::1"), 64)
+                .destination(v6("fd00::2"))
+                .build(),
+        );
+    }
+
+    #[test]
+    fn a_retry_for_the_same_address_clears_its_destination_failure() {
+        let builder = TunBuilder::new()
+            .address(v4(10, 0, 0, 1), 24)
+            // Wrong family first...
+            .destination(v6("fd00::2"))
+            // ...then the corrected destination for the same address.
+            .destination(v4(10, 0, 0, 2));
+
+        assert_eq!(builder.addresses[0].destination, Some(v4(10, 0, 0, 2)));
+        builder.validate().unwrap();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[test]
+    fn a_later_success_does_not_clear_an_earlier_broadcast_failure() {
+        assert_invalid_input(
+            TunBuilder::new()
+                .address(v6("fd00::1"), 64)
+                .broadcast(Ipv4Addr::new(10, 0, 0, 255))
+                .address(v4(10, 0, 0, 2), 24)
+                .broadcast(Ipv4Addr::new(10, 0, 0, 255))
+                .build(),
+        );
+    }
+
+    #[test]
     fn build_rejects_destination_without_address() {
         assert_invalid_input(TunBuilder::new().destination(v4(10, 0, 0, 2)).build());
+    }
+
+    #[test]
+    fn build_rejects_destination_before_address() {
+        assert_invalid_input(
+            TunBuilder::new()
+                .destination(v4(10, 0, 0, 2))
+                .address(v4(10, 0, 0, 1), 24)
+                .build(),
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[test]
+    fn build_rejects_broadcast_before_address() {
+        assert_invalid_input(
+            TunBuilder::new()
+                .tap()
+                .broadcast(Ipv4Addr::new(10, 0, 0, 255))
+                .address(v4(10, 0, 0, 1), 24)
+                .build(),
+        );
     }
 
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -692,6 +953,12 @@ mod tests {
         );
     }
 
+    #[test]
+    fn build_rejects_non_positive_mtu() {
+        assert_invalid_input(TunBuilder::new().mtu(0).build());
+        assert_invalid_input(TunBuilder::new().mtu(-1).build());
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn build_rejects_invalid_names() {
@@ -704,6 +971,52 @@ mod tests {
     fn build_rejects_invalid_queue_counts() {
         assert_invalid_input(TunBuilder::new().queues(0).build());
         assert_invalid_input(TunBuilder::new().queues(257).build());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn build_one_rejects_multi_queue_builder() {
+        assert_invalid_input(TunBuilder::new().queues(2).build_one());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn packet_info_clears_no_pi_flag() {
+        let params: Params = TunBuilder::new().packet_info().into();
+        assert_eq!(params.flags & libc::IFF_NO_PI as i16, 0);
+        let params: Params = TunBuilder::new().into();
+        assert_ne!(params.flags & libc::IFF_NO_PI as i16, 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn offload_features_require_checksum() {
+        assert_invalid_input(TunBuilder::new().offload_features(TUN_F_TSO4).build());
+        assert_invalid_input(TunBuilder::new().offload_features(TUN_F_USO4).build());
+        assert_invalid_input(TunBuilder::new().offload_features(0x80).build());
+        assert_invalid_input(
+            TunBuilder::new()
+                .offload_features(TUN_F_CSUM | TUN_F_USO4)
+                .build(),
+        );
+        assert_invalid_input(
+            TunBuilder::new()
+                .offload_features(TUN_F_CSUM | TUN_F_TSO_ECN)
+                .build(),
+        );
+        assert!(
+            TunBuilder::new()
+                .offload_features(TUN_F_CSUM | TUN_F_TSO4)
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            TunBuilder::new()
+                .offload_features(TUN_F_CSUM | TUN_F_USO4 | TUN_F_USO6)
+                .validate()
+                .is_ok()
+        );
+        assert!(TunBuilder::new().offload_features(0).validate().is_ok());
     }
 
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -810,6 +1123,34 @@ mod tests {
                 .destination(v6("fd00::2"))
                 .validate()
                 .is_ok()
+        );
+    }
+
+    #[cfg(target_os = "freebsd")]
+    #[test]
+    fn freebsd_accepts_tun_and_tap_names() {
+        assert!(TunBuilder::new().name("tun0").validate().is_ok());
+        assert!(TunBuilder::new().tap().name("tap0").validate().is_ok());
+        assert!(TunBuilder::new().name("").validate().is_ok());
+    }
+
+    #[cfg(target_os = "freebsd")]
+    #[test]
+    fn freebsd_rejects_invalid_names() {
+        assert_invalid_input(TunBuilder::new().name("tap0").build());
+        assert_invalid_input(TunBuilder::new().tap().name("tun0").build());
+        assert_invalid_input(TunBuilder::new().name("tun01").build());
+        assert_invalid_input(TunBuilder::new().name("tunx").build());
+    }
+
+    #[cfg(target_os = "freebsd")]
+    #[test]
+    fn freebsd_rejects_ipv6_destination_below_128() {
+        assert_invalid_input(
+            TunBuilder::new()
+                .address(v6("fd00::1"), 64)
+                .destination(v6("fd00::2"))
+                .build(),
         );
     }
 }

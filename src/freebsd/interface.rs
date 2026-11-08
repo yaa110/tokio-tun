@@ -4,15 +4,17 @@ use super::address::{
 };
 use super::params::Params;
 use super::sys::*;
-use crate::Result;
 use crate::address::{AddressConfig, AddressInfo, ipv4_broadcast};
+use crate::builder::MAX_INTERFACE_NAME_LEN;
 use std::ffi::{CStr, CString};
 use std::io;
 use std::mem;
 use std::net::{IpAddr, Ipv4Addr};
 use std::ptr;
 
-const MAX_INTERFACE_NAME_LEN: usize = 15;
+// Compile-time layout checks: the `ifaliasreq`/`in6_aliasreq` ioctls encode
+// their size in the request code, so struct drift must fail at build time.
+const _: () = assert!(mem::size_of::<libc::ifreq>() == 32);
 
 pub struct Interface {
     fds: Vec<i32>,
@@ -24,7 +26,7 @@ pub struct Interface {
 }
 
 impl Interface {
-    pub fn new(params: &Params) -> Result<Self> {
+    pub fn new(params: &Params) -> io::Result<Self> {
         let prefix = if params.tap { "tap" } else { "tun" };
         let requested = params.name.as_deref().unwrap_or("");
         let (fd, name) = open_device(prefix, requested, params.cloexec)?;
@@ -38,7 +40,7 @@ impl Interface {
                 let err = io::Error::last_os_error();
                 // SAFETY: `fd` is owned by this function on the error path.
                 unsafe { libc::close(fd) };
-                return Err(err.into());
+                return Err(err);
             }
         }
 
@@ -68,7 +70,7 @@ impl Interface {
                         libc::close(fd);
                         libc::close(socket);
                     }
-                    return Err(err.into());
+                    return Err(err);
                 }
             }
         } else {
@@ -85,7 +87,8 @@ impl Interface {
         })
     }
 
-    pub fn init(&self, params: &Params) -> Result<()> {
+    pub fn init(&self, params: &Params) -> io::Result<()> {
+        self.index()?;
         if let Some(mtu) = params.mtu {
             self.mtu(Some(mtu))?;
         }
@@ -113,11 +116,27 @@ impl Interface {
         self.name.as_str()
     }
 
-    pub fn index(&self) -> Result<u32> {
+    pub fn index(&self) -> io::Result<u32> {
+        let mut name = [0 as libc::c_char; libc::IFNAMSIZ];
+        // SAFETY: `name` is a writable IFNAMSIZ buffer and `self.index` is a
+        // previously resolved interface index.
+        let resolved = unsafe { libc::if_indextoname(self.index, name.as_mut_ptr()) };
+        if resolved.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `if_indextoname` returned a NUL-terminated name.
+        let resolved = unsafe { CStr::from_ptr(resolved) };
+        if resolved.to_bytes() != self.name.as_bytes() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "interface identity changed",
+            ));
+        }
         Ok(self.index)
     }
 
-    pub fn mtu(&self, mtu: Option<i32>) -> Result<i32> {
+    pub fn mtu(&self, mtu: Option<i32>) -> io::Result<i32> {
+        self.index()?;
         let mut req = ifreq_for(&self.name);
         if let Some(mtu) = mtu {
             req.ifr_ifru.ifru_mtu = mtu;
@@ -125,23 +144,30 @@ impl Interface {
             Ok(mtu)
         } else {
             ioctl_ptr_mut(self.socket, SIOCGIFMTU, &mut req)?;
+            // SAFETY: a successful SIOCGIFMTU initialized `ifru_mtu`.
             Ok(unsafe { req.ifr_ifru.ifru_mtu })
         }
     }
 
-    pub fn flags(&self, flags: Option<i16>) -> Result<i16> {
+    pub fn flags(&self, flags: Option<i16>) -> io::Result<u32> {
+        self.index()?;
         let mut req = ifreq_for(&self.name);
         ioctl_ptr_mut(self.socket, SIOCGIFFLAGS, &mut req)?;
         if let Some(flags) = flags {
+            // SAFETY: the union was initialized by SIOCGIFFLAGS above.
             unsafe {
                 req.ifr_ifru.ifru_flags[0] |= flags;
             }
             ioctl_ptr(self.socket, SIOCSIFFLAGS, &req)?;
         }
-        Ok(unsafe { req.ifr_ifru.ifru_flags[0] })
+        // FreeBSD stores interface flags in two 16-bit halves.
+        // SAFETY: the union was initialized by SIOCGIFFLAGS above.
+        let [low, high] = unsafe { req.ifr_ifru.ifru_flags };
+        Ok((low as u16 as u32) | ((high as u16 as u32) << 16))
     }
 
-    pub fn netmask(&self) -> Result<Ipv4Addr> {
+    pub fn netmask(&self) -> io::Result<Ipv4Addr> {
+        self.index()?;
         let addresses = self.addresses()?;
         let address = addresses
             .iter()
@@ -155,12 +181,13 @@ impl Interface {
         Ok(prefix_to_ipv4_mask(address.prefix_len))
     }
 
-    pub fn addresses(&self) -> Result<Vec<AddressInfo>> {
+    pub fn addresses(&self) -> io::Result<Vec<AddressInfo>> {
+        self.index()?;
         let mut ifap: *mut libc::ifaddrs = ptr::null_mut();
         // SAFETY: `ifap` is a valid out-pointer and the returned list is
         // released by `freeifaddrs` below.
         if unsafe { libc::getifaddrs(&mut ifap) } != 0 {
-            return Err(io::Error::last_os_error().into());
+            return Err(io::Error::last_os_error());
         }
         let guard = Ifaddrs(ifap);
         let mut addresses = Vec::new();
@@ -178,8 +205,7 @@ impl Interface {
                 let family = if ifa.ifa_addr.is_null() {
                     0
                 } else {
-                    // SAFETY: `ifa_addr` is a getifaddrs sockaddr pointer.
-                    i32::from(unsafe { &*ifa.ifa_addr }.sa_family)
+                    sockaddr_family(ifa.ifa_addr)
                 };
                 let (min_len, prefix_len) = match family {
                     libc::AF_INET => (
@@ -269,20 +295,20 @@ impl Interface {
         Ok(addresses)
     }
 
-    pub fn mac_address(&self) -> Result<[u8; 6]> {
+    pub fn mac_address(&self) -> io::Result<[u8; 6]> {
+        self.index()?;
         if self.is_tun {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "interface has no hardware address",
-            )
-            .into());
+            ));
         }
 
         let mut ifap: *mut libc::ifaddrs = ptr::null_mut();
         // SAFETY: `ifap` is a valid out-pointer and the returned list is
         // released by `freeifaddrs` below.
         if unsafe { libc::getifaddrs(&mut ifap) } != 0 {
-            return Err(io::Error::last_os_error().into());
+            return Err(io::Error::last_os_error());
         }
         let guard = Ifaddrs(ifap);
         let mut current = guard.0;
@@ -292,26 +318,27 @@ impl Interface {
             if !ifa.ifa_name.is_null()
                 && unsafe { CStr::from_ptr(ifa.ifa_name) }.to_bytes() == self.name.as_bytes()
                 && !ifa.ifa_addr.is_null()
+                && sockaddr_family(ifa.ifa_addr) == libc::AF_LINK
             {
-                // SAFETY: `ifa_addr` points to a valid `sockaddr` header.
-                let header = unsafe { &*ifa.ifa_addr.cast::<libc::sockaddr>() };
-                if i32::from(header.sa_family) == libc::AF_LINK {
-                    // SAFETY: an AF_LINK address is a `sockaddr_dl`; validate
-                    // its declared length before reading link-layer data.
-                    let sdl = unsafe { &*ifa.ifa_addr.cast::<libc::sockaddr_dl>() };
-                    let start = usize::from(sdl.sdl_nlen);
-                    let end = 8usize
-                        .checked_add(start)
-                        .and_then(|offset| offset.checked_add(6))
-                        .unwrap_or(usize::MAX);
-                    if sdl.sdl_alen == 6
-                        && usize::from(sdl.sdl_len) >= end
-                        && start + 6 <= sdl.sdl_data.len()
-                    {
+                // `sockaddr_dl` fields are read from raw bytes so a short
+                // link-layer sockaddr never becomes a full `&sockaddr_dl`.
+                let base = ifa.ifa_addr.cast::<u8>();
+                // SAFETY: every sockaddr_dl has sdl_len at offset 0.
+                let sdl_len = unsafe { base.read() } as usize;
+                if sdl_len >= 8 {
+                    // SAFETY: `sdl_len >= 8` makes sdl_nlen (offset 5) and
+                    // sdl_alen (offset 6) readable.
+                    let sdl_nlen = unsafe { base.add(5).read() } as usize;
+                    // SAFETY: see above.
+                    let sdl_alen = unsafe { base.add(6).read() } as usize;
+                    let start = 8usize.saturating_add(sdl_nlen);
+                    let end = start.saturating_add(6);
+                    if sdl_alen == 6 && sdl_len >= end {
+                        // SAFETY: `sdl_len` bounds the sockaddr_dl allocation
+                        // and `end <= sdl_len`.
+                        let data = unsafe { std::slice::from_raw_parts(base.add(start), 6) };
                         let mut mac = [0u8; 6];
-                        for (dst, src) in mac.iter_mut().zip(&sdl.sdl_data[start..start + 6]) {
-                            *dst = src.to_ne_bytes()[0];
-                        }
+                        mac.copy_from_slice(data);
                         return Ok(mac);
                     }
                 }
@@ -321,17 +348,16 @@ impl Interface {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "interface has no hardware address",
-        )
-        .into())
+        ))
     }
 
-    pub fn set_mac_address(&self, mac: [u8; 6]) -> Result<()> {
+    pub fn set_mac_address(&self, mac: [u8; 6]) -> io::Result<()> {
+        self.index()?;
         if self.is_tun {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "interface has no hardware address",
-            )
-            .into());
+            ));
         }
         crate::address::validate_mac(mac)
             .map_err(|reason| io::Error::new(io::ErrorKind::InvalidInput, reason))?;
@@ -348,13 +374,13 @@ impl Interface {
         ioctl_ptr(self.socket, SIOCSIFLLADDR, &req)
     }
 
-    pub fn broadcast(&self) -> Result<Ipv4Addr> {
+    pub fn broadcast(&self) -> io::Result<Ipv4Addr> {
+        self.index()?;
         if self.is_tun {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "interface has no broadcast address",
-            )
-            .into());
+            ));
         }
         self.addresses()?
             .iter()
@@ -365,13 +391,13 @@ impl Interface {
                     io::ErrorKind::AddrNotAvailable,
                     "interface has no broadcast address",
                 )
-                .into()
             })
     }
 
-    fn add_address(&self, config: &AddressConfig) -> Result<()> {
+    fn add_address(&self, config: &AddressConfig) -> io::Result<()> {
         match config.address {
             IpAddr::V4(address) => {
+                // SAFETY: `IfAliasReq` is a C POD type; all-zero is valid.
                 let mut req: IfAliasReq = unsafe { mem::zeroed() };
                 copy_name(&self.name, &mut req.ifra_name)?;
                 req.ifra_addr = sockaddr_v4(address);
@@ -385,8 +411,7 @@ impl Interface {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidInput,
                             "destination address family mismatch",
-                        )
-                        .into());
+                        ));
                     };
                     req.ifra_broadaddr = sockaddr_v4(destination);
                 } else if let Some(broadcast) = config.broadcast {
@@ -396,6 +421,7 @@ impl Interface {
                 ioctl_ptr(self.socket, SIOCAIFADDR, &req)
             }
             IpAddr::V6(address) => {
+                // SAFETY: `In6AliasReq` is a C POD type; all-zero is valid.
                 let mut req: In6AliasReq = unsafe { mem::zeroed() };
                 copy_name(&self.name, &mut req.ifra_name)?;
                 req.ifra_addr = sockaddr_v6(address);
@@ -404,8 +430,7 @@ impl Interface {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidInput,
                             "destination address family mismatch",
-                        )
-                        .into());
+                        ));
                     };
                     req.ifra_dstaddr = sockaddr_v6(destination);
                 }
@@ -426,7 +451,7 @@ impl Interface {
     }
 }
 
-pub(crate) fn set_persist(fd: i32, persist: bool) -> Result<()> {
+pub(crate) fn set_persist(fd: i32, persist: bool) -> io::Result<()> {
     let transient: libc::c_int = if persist { 0 } else { 1 };
     ioctl_ptr(fd, TUNSTRANSIENT, &transient)
 }
@@ -444,19 +469,31 @@ impl Drop for Interface {
     }
 }
 
+fn sockaddr_len(ptr: *const libc::sockaddr) -> usize {
+    // SAFETY: every getifaddrs sockaddr starts with the one-byte `sa_len`.
+    unsafe { ptr.cast::<u8>().read() as usize }
+}
+
+fn sockaddr_family(ptr: *const libc::sockaddr) -> i32 {
+    // SAFETY: every getifaddrs sockaddr has the one-byte `sa_family` at offset
+    // 1.
+    unsafe { ptr.cast::<u8>().add(1).read() as i32 }
+}
+
 fn sockaddr_is(address: *const libc::sockaddr, family: libc::c_int, min_len: usize) -> bool {
     if address.is_null() {
         return false;
     }
-    // SAFETY: `address` is a getifaddrs sockaddr pointer.
-    let address = unsafe { &*address };
-    i32::from(address.sa_family) == family && usize::from(address.sa_len) >= min_len
+    sockaddr_family(address) == family && sockaddr_len(address) >= min_len
 }
 
 struct Ifaddrs(*mut libc::ifaddrs);
 
 impl Drop for Ifaddrs {
     fn drop(&mut self) {
+        if self.0.is_null() {
+            return;
+        }
         // SAFETY: the list was allocated by getifaddrs and is owned here.
         unsafe { libc::freeifaddrs(self.0) };
     }
@@ -493,7 +530,7 @@ fn destroy_device(req: &libc::ifreq) {
     }
 }
 
-fn create_device(name: &str, cloexec: bool) -> Result<i32> {
+fn create_device(name: &str, cloexec: bool) -> io::Result<i32> {
     let socket = create_socket(libc::AF_INET, 0)?;
     let mut req = ifreq_for(name);
     let result = ioctl_ptr_mut(socket, SIOCIFCREATE2, &mut req);
@@ -505,19 +542,21 @@ fn create_device(name: &str, cloexec: bool) -> Result<i32> {
         Ok(fd) => fd,
         Err(err) => {
             destroy_device(&req);
-            return Err(err.into());
+            return Err(err);
         }
     };
     if let Err(err) = set_persist(fd, false) {
+        // Closing the last descriptor of a transient device destroys it by
+        // identity. Do not follow up with a name-based `SIOCIFDESTROY`: the
+        // name could already have been reused by another process.
         // SAFETY: `fd` is owned by this function on the error path.
         unsafe { libc::close(fd) };
-        destroy_device(&req);
         return Err(err);
     }
     Ok(fd)
 }
 
-fn open_device(prefix: &str, requested: &str, cloexec: bool) -> Result<(i32, String)> {
+fn open_device(prefix: &str, requested: &str, cloexec: bool) -> io::Result<(i32, String)> {
     if !requested.is_empty() {
         if requested.len() > MAX_INTERFACE_NAME_LEN
             || !requested.starts_with(prefix)
@@ -526,8 +565,7 @@ fn open_device(prefix: &str, requested: &str, cloexec: bool) -> Result<(i32, Str
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "interface name must be tunN or tapN",
-            )
-            .into());
+            ));
         }
         let suffix = &requested[prefix.len()..];
         if suffix.is_empty()
@@ -537,10 +575,10 @@ fn open_device(prefix: &str, requested: &str, cloexec: bool) -> Result<(i32, Str
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "interface name must be tunN or tapN",
-            )
-            .into());
+            ));
         }
-        let fd = if if_nametoindex(requested).is_ok() {
+        let exists = if_nametoindex(requested).is_ok();
+        let fd = if exists {
             open_path(&format!("/dev/{requested}"), cloexec)?
         } else {
             create_device(requested, cloexec)?
@@ -549,17 +587,20 @@ fn open_device(prefix: &str, requested: &str, cloexec: bool) -> Result<(i32, Str
             Ok(actual) if actual == requested => return Ok((fd, requested.to_owned())),
             Ok(actual) => {
                 // SAFETY: `fd` is owned by this function on the error path.
+                // Closing the last descriptor of a transient device destroys
+                // it; destroying by name afterwards would race with reuse.
                 unsafe { libc::close(fd) };
                 return Err(io::Error::new(
                     io::ErrorKind::NotFound,
                     format!("device {requested} is attached to interface {actual}"),
-                )
-                .into());
+                ));
             }
             Err(err) => {
                 // SAFETY: `fd` is owned by this function on the error path.
+                // Closing the last descriptor of a transient device destroys
+                // it; destroying by name afterwards would race with reuse.
                 unsafe { libc::close(fd) };
-                return Err(err.into());
+                return Err(err);
             }
         }
     }
@@ -575,6 +616,8 @@ fn open_device(prefix: &str, requested: &str, cloexec: bool) -> Result<(i32, Str
                 Ok(actual) if actual == name => return Ok((fd, name)),
                 Ok(_) => {
                     // SAFETY: `fd` is owned by this function on the error path.
+                    // Closing the last descriptor of a transient device
+                    // destroys it; destroying by name would race with reuse.
                     unsafe { libc::close(fd) };
                     last_error = Some(io::Error::new(
                         io::ErrorKind::AlreadyExists,
@@ -583,19 +626,25 @@ fn open_device(prefix: &str, requested: &str, cloexec: bool) -> Result<(i32, Str
                 }
                 Err(err) => {
                     // SAFETY: `fd` is owned by this function on the error path.
+                    // Closing the last descriptor of a transient device
+                    // destroys it; destroying by name would race with reuse.
                     unsafe { libc::close(fd) };
                     last_error = Some(err);
                 }
             },
             Err(err) => {
-                let crate::Error::IoError(err) = err;
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::PermissionDenied | io::ErrorKind::NotFound
+                ) {
+                    return Err(err);
+                }
                 last_error = Some(err);
             }
         }
     }
     Err(last_error
-        .unwrap_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no TUN/TAP device found"))
-        .into())
+        .unwrap_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no TUN/TAP device found")))
 }
 
 fn open_path(path: &str, cloexec: bool) -> io::Result<i32> {
@@ -629,6 +678,7 @@ fn if_nametoindex(name: &str) -> io::Result<u32> {
 }
 
 fn ifreq_for(name: &str) -> libc::ifreq {
+    // SAFETY: `ifreq` is a C POD type; all-zero is valid.
     let mut req: libc::ifreq = unsafe { mem::zeroed() };
     // The builder and Interface validate names before this point.
     let bytes = name.as_bytes();
@@ -639,9 +689,12 @@ fn ifreq_for(name: &str) -> libc::ifreq {
     req
 }
 
-fn copy_name(name: &str, dst: &mut [libc::c_char; libc::IFNAMSIZ]) -> Result<()> {
+fn copy_name(name: &str, dst: &mut [libc::c_char; libc::IFNAMSIZ]) -> io::Result<()> {
     if name.len() >= libc::IFNAMSIZ {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "interface name too long").into());
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "interface name too long",
+        ));
     }
     for (dst, src) in dst.iter_mut().zip(name.bytes()) {
         *dst = src as libc::c_char;
@@ -649,20 +702,36 @@ fn copy_name(name: &str, dst: &mut [libc::c_char; libc::IFNAMSIZ]) -> Result<()>
     Ok(())
 }
 
-fn ioctl_ptr<T>(fd: i32, request: libc::c_ulong, value: &T) -> Result<()> {
+fn ioctl_ptr<T>(fd: i32, request: libc::c_ulong, value: &T) -> io::Result<()> {
     // SAFETY: `fd` is an open socket/device and `value` is valid for the ioctl.
     let result = unsafe { libc::ioctl(fd, request, value as *const T) };
     if result < 0 {
-        return Err(io::Error::last_os_error().into());
+        return Err(io::Error::last_os_error());
     }
     Ok(())
 }
 
-fn ioctl_ptr_mut<T>(fd: i32, request: libc::c_ulong, value: &mut T) -> Result<()> {
+fn ioctl_ptr_mut<T>(fd: i32, request: libc::c_ulong, value: &mut T) -> io::Result<()> {
     // SAFETY: `fd` is an open socket/device and `value` is valid for the ioctl.
     let result = unsafe { libc::ioctl(fd, request, value as *mut T) };
     if result < 0 {
-        return Err(io::Error::last_os_error().into());
+        return Err(io::Error::last_os_error());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_short_sockaddr_header_without_full_reference() {
+        let mut short = [0u8; 5];
+        short[0] = 5;
+        short[1] = libc::AF_INET as u8;
+        let ptr = short.as_ptr().cast::<libc::sockaddr>();
+        assert_eq!(sockaddr_len(ptr), 5);
+        assert_eq!(sockaddr_family(ptr), libc::AF_INET);
+        assert!(sockaddr_is(ptr, libc::AF_INET, 4));
+    }
 }
