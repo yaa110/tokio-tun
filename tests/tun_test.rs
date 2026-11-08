@@ -2,10 +2,42 @@
 
 use std::io::IoSlice;
 use std::net::{IpAddr, Ipv4Addr};
-use std::os::unix::io::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UdpSocket;
 use tokio_tun::Tun;
+
+#[repr(C)]
+struct RawIfReq {
+    name: [u8; 16],
+    flags: i16,
+    pad: [u8; 22],
+}
+
+fn open_raw_tun(name: &str, flags: i16) -> OwnedFd {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/net/tun")
+        .expect("open /dev/net/tun");
+    let mut req = RawIfReq {
+        name: [0; 16],
+        flags,
+        pad: [0; 22],
+    };
+    req.name[..name.len()].copy_from_slice(name.as_bytes());
+    // SAFETY: `req` is a valid ifreq and `file` owns an open TUN descriptor.
+    let result = unsafe { libc::ioctl(file.as_raw_fd(), libc::TUNSETIFF, &mut req) };
+    assert_eq!(
+        result,
+        0,
+        "TUNSETIFF failed: {}",
+        std::io::Error::last_os_error()
+    );
+    let raw = file.into_raw_fd();
+    // SAFETY: ownership of `raw` is transferred to the returned `OwnedFd`.
+    unsafe { OwnedFd::from_raw_fd(raw) }
+}
 
 macro_rules! skip_without_cap_net_admin {
     ($expr:expr) => {
@@ -14,7 +46,7 @@ macro_rules! skip_without_cap_net_admin {
             Err(err) => {
                 let can_skip = matches!(
                     &err,
-                    tokio_tun::Error::IoError(e)
+                    e
                         if e.kind() == std::io::ErrorKind::PermissionDenied
                             || e.raw_os_error() == Some(libc::EPERM)
                             || e.kind() == std::io::ErrorKind::NotFound
@@ -35,6 +67,7 @@ macro_rules! skip_without_cap_net_admin {
     };
 }
 
+#[ignore = "requires root/CAP_NET_ADMIN"]
 #[tokio::test]
 async fn test_tun_builder_defaults_and_kernel_naming() {
     let tun = skip_without_cap_net_admin!(Tun::builder().name("").build())
@@ -52,6 +85,7 @@ async fn test_tun_builder_defaults_and_kernel_naming() {
     assert!(tun.flags().is_ok());
 }
 
+#[ignore = "requires root/CAP_NET_ADMIN"]
 #[tokio::test]
 async fn test_tun_config_getters() {
     let tun = skip_without_cap_net_admin!(
@@ -80,9 +114,10 @@ async fn test_tun_config_getters() {
     );
     assert_eq!(tun.broadcast().unwrap(), Ipv4Addr::new(10, 50, 0, 255));
     assert_eq!(tun.mtu().unwrap(), 1420);
-    assert!(tun.flags().unwrap() & libc::IFF_UP as i16 != 0);
+    assert!(tun.flags().unwrap() & libc::IFF_UP as u32 != 0);
 }
 
+#[ignore = "requires root/CAP_NET_ADMIN"]
 #[tokio::test]
 async fn test_multiple_ipv4_and_ipv6_addresses() {
     let tun = skip_without_cap_net_admin!(
@@ -145,6 +180,7 @@ async fn test_multiple_ipv4_and_ipv6_addresses() {
     );
 }
 
+#[ignore = "requires root/CAP_NET_ADMIN"]
 #[tokio::test]
 async fn test_tap_auto_broadcast() {
     let tap = skip_without_cap_net_admin!(
@@ -165,6 +201,7 @@ async fn test_tap_auto_broadcast() {
     }));
 }
 
+#[ignore = "requires root/CAP_NET_ADMIN"]
 #[tokio::test]
 async fn test_tap_mac_address() {
     let tun = skip_without_cap_net_admin!(
@@ -192,14 +229,15 @@ async fn test_tap_mac_address() {
 
     for mac in [[0x01, 0x00, 0x00, 0x00, 0x00, 0x00], [0x00; 6], [0xff; 6]] {
         match tun.set_mac_address(mac) {
-            Err(tokio_tun::Error::IoError(err)) => {
-                assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput)
-            }
             Ok(()) => panic!("expected invalid MAC address error for {mac:?}"),
+            Err(err) => {
+                assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+            }
         }
     }
 }
 
+#[ignore = "requires root/CAP_NET_ADMIN"]
 #[tokio::test]
 async fn test_multi_queue_tap_mac_address() {
     let tuns = skip_without_cap_net_admin!(
@@ -220,6 +258,7 @@ async fn test_multi_queue_tap_mac_address() {
     }
 }
 
+#[ignore = "requires root/CAP_NET_ADMIN"]
 #[tokio::test]
 async fn test_tun_mac_address_unsupported() {
     let tun = skip_without_cap_net_admin!(Tun::builder().name("tunmac0").build())
@@ -227,35 +266,38 @@ async fn test_tun_mac_address_unsupported() {
         .expect("tun instance");
 
     match tun.mac_address() {
-        Err(tokio_tun::Error::IoError(err)) => {
-            assert_eq!(err.kind(), std::io::ErrorKind::Unsupported)
-        }
         Ok(mac) => panic!("expected unsupported error, got {mac:?}"),
+        Err(err) => {
+            assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+        }
     }
 
     match tun.set_mac_address([0x02, 0x11, 0x22, 0x33, 0x44, 0x55]) {
-        Err(tokio_tun::Error::IoError(err)) => {
-            assert_eq!(err.kind(), std::io::ErrorKind::Unsupported)
-        }
         Ok(()) => panic!("expected unsupported error"),
+        Err(err) => {
+            assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+        }
     }
 
     // Device-type detection must win over argument validation so that every
     // MAC operation on a TUN consistently reports `Unsupported`.
     match tun.set_mac_address([0x00; 6]) {
-        Err(tokio_tun::Error::IoError(err)) => {
-            assert_eq!(err.kind(), std::io::ErrorKind::Unsupported)
-        }
         Ok(()) => panic!("expected unsupported error"),
+        Err(err) => {
+            assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+        }
     }
 }
 
+#[ignore = "requires root/CAP_NET_ADMIN"]
 #[tokio::test]
 async fn test_failed_build_does_not_leave_interface() {
     let _check = skip_without_cap_net_admin!(Tun::builder().name("").build());
 
+    // The client-side validator accepts this MTU; the kernel rejects it after
+    // the interface has been allocated, so this exercises real cleanup.
     for name in ["tunleak0", "tunleak1"] {
-        assert!(Tun::builder().name(name).mtu(-1).build().is_err());
+        assert!(Tun::builder().name(name).mtu(i32::MAX).build().is_err());
         assert_eq!(
             interface_index(name),
             0,
@@ -267,7 +309,7 @@ async fn test_failed_build_does_not_leave_interface() {
         Tun::builder()
             .name("tunleak2")
             .persist()
-            .mtu(-1)
+            .mtu(i32::MAX)
             .build()
             .is_err()
     );
@@ -276,9 +318,11 @@ async fn test_failed_build_does_not_leave_interface() {
 
 fn interface_index(name: &str) -> u32 {
     let name = std::ffi::CString::new(name).unwrap();
+    // SAFETY: `name` is a NUL-terminated CString valid for the call.
     unsafe { libc::if_nametoindex(name.as_ptr()) }
 }
 
+#[ignore = "requires root/CAP_NET_ADMIN"]
 #[tokio::test]
 async fn test_tap_device() {
     let tap =
@@ -291,6 +335,7 @@ async fn test_tap_device() {
     assert!(tap.as_raw_fd() > 0);
 }
 
+#[ignore = "requires root/CAP_NET_ADMIN"]
 #[tokio::test]
 async fn test_multi_queue() {
     let tuns =
@@ -310,6 +355,7 @@ async fn test_multi_queue() {
     }
 }
 
+#[ignore = "requires root/CAP_NET_ADMIN"]
 #[tokio::test]
 async fn test_multi_queue_single_queue() {
     let tuns = skip_without_cap_net_admin!(Tun::builder().name("tunmq1q0").queues(1).up().build());
@@ -320,6 +366,7 @@ async fn test_multi_queue_single_queue() {
     let fd = tuns[0].as_raw_fd();
     let queue: tokio_tun::TunQueue = tuns.into_iter().next().unwrap().into();
     assert_eq!(queue.as_raw_fd(), fd);
+    // SAFETY: `fd` is an open descriptor and F_GETFL only reads status flags.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
     assert!(flags >= 0);
     assert_ne!(flags & libc::O_NONBLOCK, 0);
@@ -331,6 +378,7 @@ async fn test_multi_queue_single_queue() {
     assert_ne!(second[0].as_raw_fd(), fd);
 }
 
+#[ignore = "requires root/CAP_NET_ADMIN"]
 #[tokio::test]
 async fn test_single_queue_rejects_multi_queue_attach() {
     let tuns = skip_without_cap_net_admin!(Tun::builder().name("tunsq0").up().build());
@@ -340,11 +388,11 @@ async fn test_single_queue_rejects_multi_queue_attach() {
         Ok(_) => panic!("single-queue device accepted a multi-queue attach"),
         Err(err) => err,
     };
-    let tokio_tun::Error::IoError(err) = err;
     assert_eq!(err.raw_os_error(), Some(libc::EINVAL));
     drop(tuns);
 }
 
+#[ignore = "requires root/CAP_NET_ADMIN"]
 #[tokio::test]
 async fn test_packet_info() {
     let tun = skip_without_cap_net_admin!(
@@ -359,6 +407,9 @@ async fn test_packet_info() {
     .pop()
     .expect("tun instance");
 
+    assert!(tun.packet_info());
+    assert_eq!(tun.vnet_hdr_len(), 0);
+
     let socket = UdpSocket::bind("10.60.0.1:0").await.expect("bind udp");
     let payload = b"ping packet info";
 
@@ -371,13 +422,15 @@ async fn test_packet_info() {
             .send_to(payload, "10.60.0.2:8888")
             .await
             .expect("send_to");
-        if let Ok(Ok(n)) =
+        if let Ok(Ok(packet)) =
             tokio::time::timeout(std::time::Duration::from_millis(300), tun.recv(&mut buf)).await
-            && n >= 4
-            && buf[4..n].windows(payload.len()).any(|w| w == payload)
+            && packet.len() >= 4
+            && packet.payload()[4..]
+                .windows(payload.len())
+                .any(|window| window == payload)
         {
             // Packet info adds 4 bytes prefix: 2 bytes flags, 2 bytes proto (ETH_P_IP = 0x0800)
-            let proto = u16::from_be_bytes([buf[2], buf[3]]);
+            let proto = u16::from_be_bytes([packet[2], packet[3]]);
             assert_eq!(proto, libc::ETH_P_IP as u16);
             found = true;
             break;
@@ -386,6 +439,30 @@ async fn test_packet_info() {
     assert!(found, "expected payload with packet_info not received");
 }
 
+#[ignore = "requires root/CAP_NET_ADMIN"]
+#[tokio::test]
+async fn test_external_packet_info_is_detected() {
+    let tun =
+        skip_without_cap_net_admin!(Tun::builder().name("tunpiext0").packet_info().up().build())
+            .pop()
+            .unwrap();
+    let raw = tun.into_raw_fd();
+    // SAFETY: `tun` transferred descriptor ownership to us.
+    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    let queue = tokio_tun::TunQueue::new(fd).unwrap();
+    assert!(queue.packet_info());
+}
+
+#[ignore = "requires root/CAP_NET_ADMIN"]
+#[tokio::test]
+async fn test_external_packet_info_with_vnet_is_rejected() {
+    let _check = skip_without_cap_net_admin!(Tun::builder().name("").build());
+    let fd = open_raw_tun("tunpivnet0", (libc::IFF_TUN | libc::IFF_VNET_HDR) as i16);
+    let err = tokio_tun::TunQueue::new(fd).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+}
+
+#[ignore = "requires root/CAP_NET_ADMIN"]
 #[tokio::test]
 async fn test_async_read_write_traits() {
     let mut tun = skip_without_cap_net_admin!(
@@ -426,13 +503,14 @@ async fn test_async_read_write_traits() {
     tun.flush().await.expect("flush tun");
 }
 
+#[ignore = "requires root/CAP_NET_ADMIN"]
 #[tokio::test]
 async fn test_vectored_and_send_methods() {
     let tun = skip_without_cap_net_admin!(Tun::builder().name("tunvec0").up().build())
         .pop()
         .expect("tun instance");
 
-    // Test sendv, sendv_all, try_send, try_sendv, try_recv
+    // Test sendv, try_send, try_sendv, try_recv
     let mut dummy_ip = [0u8; 28];
     dummy_ip[0] = 0x45; // IPv4, header len 20
     dummy_ip[8] = 64; // TTL
@@ -442,14 +520,9 @@ async fn test_vectored_and_send_methods() {
     let part2 = &dummy_ip[14..];
     let bufs = [IoSlice::new(part1), IoSlice::new(part2)];
 
-    let written = tun.sendv(&bufs).await.expect("sendv");
-    assert_eq!(written, 28);
-
-    let mut bufs_all = [IoSlice::new(part1), IoSlice::new(part2)];
-    tun.sendv_all(&mut bufs_all).await.expect("sendv_all");
+    tun.sendv(&bufs).await.expect("sendv");
 
     tun.send(&dummy_ip).await.expect("send");
-    tun.send_all(&dummy_ip).await.expect("send_all");
 
     let _ = tun.try_send(&dummy_ip);
     let _ = tun.try_sendv(&bufs);
@@ -458,6 +531,7 @@ async fn test_vectored_and_send_methods() {
     let _ = tun.try_recv(&mut recv_buf);
 }
 
+#[ignore = "requires root/CAP_NET_ADMIN"]
 #[tokio::test]
 async fn test_invalid_config_error() {
     // Check permission first
@@ -472,14 +546,15 @@ async fn test_invalid_config_error() {
     assert!(!err_str.is_empty());
 }
 
+#[ignore = "requires root/CAP_NET_ADMIN"]
 #[tokio::test]
 async fn test_offload_virtio_header() {
     let tun = skip_without_cap_net_admin!(
         Tun::builder()
             .name("tunoff0")
             .offload()
-            .address(IpAddr::V4(Ipv4Addr::new(10, 70, 0, 1)), 24)
-            .destination(IpAddr::V4(Ipv4Addr::new(10, 70, 0, 2)))
+            .address(IpAddr::V4(Ipv4Addr::new(10, 71, 0, 1)), 24)
+            .destination(IpAddr::V4(Ipv4Addr::new(10, 71, 0, 2)))
             .up()
             .build()
     )
@@ -488,40 +563,73 @@ async fn test_offload_virtio_header() {
     assert_eq!(tun.vnet_hdr_len(), tokio_tun::VIRTIO_NET_HDR_LEN);
 
     let queue: tokio_tun::TunQueue = tun.into();
-    assert_eq!(queue.vnet_hdr_len().unwrap(), tokio_tun::VIRTIO_NET_HDR_LEN);
+    assert_eq!(queue.vnet_hdr_len(), tokio_tun::VIRTIO_NET_HDR_LEN);
 
-    let socket = UdpSocket::bind("10.70.0.1:0").await.unwrap();
+    let socket = UdpSocket::bind("10.71.0.1:0").await.unwrap();
     socket
-        .send_to(b"offload packet", "10.70.0.2:7777")
+        .send_to(b"offload packet", "10.71.0.2:7777")
         .await
         .unwrap();
 
-    let mut packet = vec![0u8; 65_535];
-    let (n, payload_start) = loop {
-        let n = tokio::time::timeout(std::time::Duration::from_secs(3), queue.recv(&mut packet))
-            .await
-            .expect("offload packet timed out")
-            .unwrap();
-        let payload = &packet[tokio_tun::VIRTIO_NET_HDR_LEN..n];
-        if payload
+    let mut packet = vec![0u8; queue.vnet_hdr_len() + 65_536];
+    loop {
+        let received =
+            tokio::time::timeout(std::time::Duration::from_secs(3), queue.recv(&mut packet))
+                .await
+                .expect("offload packet timed out")
+                .unwrap();
+        if received
+            .payload()
             .windows(b"offload packet".len())
-            .any(|w| w == b"offload packet")
+            .any(|window| window == b"offload packet")
         {
-            break (n, tokio_tun::VIRTIO_NET_HDR_LEN);
+            assert!(received.offload_header().is_some());
+            assert!(matches!(received[0] >> 4, 4 | 6));
+            queue.send(received).await.unwrap();
+            break;
+        }
+    }
+}
+
+#[ignore = "requires root/CAP_NET_ADMIN"]
+#[tokio::test]
+async fn test_offload_async_read_write() {
+    let tun = skip_without_cap_net_admin!(
+        Tun::builder()
+            .name("tunoffrw0")
+            .offload()
+            .address(IpAddr::V4(Ipv4Addr::new(10, 72, 0, 1)), 24)
+            .destination(IpAddr::V4(Ipv4Addr::new(10, 72, 0, 2)))
+            .up()
+            .build()
+    )
+    .pop()
+    .unwrap();
+    let mut queue: tokio_tun::TunQueue = tun.into();
+
+    let socket = UdpSocket::bind("10.72.0.1:0").await.unwrap();
+    socket
+        .send_to(b"offload async read write", "10.72.0.2:7777")
+        .await
+        .unwrap();
+
+    let mut buffer = vec![0u8; 1500];
+    let n = loop {
+        let n = tokio::time::timeout(std::time::Duration::from_secs(3), queue.read(&mut buffer))
+            .await
+            .expect("offload AsyncRead timed out")
+            .unwrap();
+        if buffer[..n]
+            .windows(b"offload async read write".len())
+            .any(|window| window == b"offload async read write")
+        {
+            break n;
         }
     };
 
-    assert!(n > payload_start);
-    let header = tokio_tun::VirtioNetHeader::decode(&packet[..payload_start]).unwrap();
-    let payload = &packet[payload_start..n];
-    assert!(matches!(payload[0] >> 4, 4 | 6));
-
-    // The virtio header is part of the packet buffer in both directions.
-    let mut framed = Vec::with_capacity(tokio_tun::VIRTIO_NET_HDR_LEN + payload.len());
-    framed.resize(tokio_tun::VIRTIO_NET_HDR_LEN, 0);
-    header.encode(&mut framed).unwrap();
-    framed.extend_from_slice(payload);
-    queue.send(&framed).await.unwrap();
+    // AsyncWrite prepends a zero virtio-net header; the kernel accepts the
+    // payload-only IP packet.
+    queue.write_all(&buffer[..n]).await.unwrap();
 }
 
 #[tokio::test]
@@ -529,20 +637,80 @@ async fn test_offload_rejects_packet_info() {
     let result = Tun::builder().offload().packet_info().build();
     assert!(matches!(
         result,
-        Err(tokio_tun::Error::IoError(ref err))
+        Err(ref err)
             if err.kind() == std::io::ErrorKind::InvalidInput
     ));
 }
 
+#[ignore = "requires root/CAP_NET_ADMIN"]
+#[tokio::test]
+async fn test_offload_custom_features() {
+    let tun = skip_without_cap_net_admin!(
+        Tun::builder()
+            .name("tunofffeat0")
+            .offload_features(tokio_tun::TUN_F_CSUM | tokio_tun::TUN_F_TSO4)
+            .up()
+            .build()
+    )
+    .pop()
+    .unwrap();
+
+    assert_eq!(
+        tun.offload_features(),
+        tokio_tun::TUN_F_CSUM | tokio_tun::TUN_F_TSO4
+    );
+    assert_eq!(tun.vnet_hdr_len(), tokio_tun::VIRTIO_NET_HDR_LEN);
+}
+
+#[ignore = "requires root/CAP_NET_ADMIN"]
+#[tokio::test]
+async fn test_offload_zero_features_enables_virtio_header_only() {
+    let tun = skip_without_cap_net_admin!(
+        Tun::builder()
+            .name("tunoffzero0")
+            .offload_features(0)
+            .up()
+            .build()
+    )
+    .pop()
+    .unwrap();
+
+    assert_eq!(tun.offload_features(), 0);
+    assert_eq!(tun.vnet_hdr_len(), tokio_tun::VIRTIO_NET_HDR_LEN);
+}
+
+#[ignore = "requires root/CAP_NET_ADMIN"]
+#[tokio::test]
+async fn test_linux_queue_detach_and_attach() {
+    let tuns = skip_without_cap_net_admin!(Tun::builder().name("tunqueue0").queues(1).up().build());
+    let queue: tokio_tun::TunQueue = tuns.into_iter().next().unwrap().into();
+
+    queue.detach().expect("detach queue");
+    queue.attach().expect("attach queue");
+}
+
+#[ignore = "requires root/CAP_NET_ADMIN"]
+#[tokio::test]
+async fn test_linux_set_carrier() {
+    let tun = skip_without_cap_net_admin!(Tun::builder().name("tuncarrier0").up().build())
+        .pop()
+        .unwrap();
+
+    tun.set_carrier(false).expect("set carrier off");
+    tun.set_carrier(true).expect("set carrier on");
+}
+
+#[ignore = "requires root/CAP_NET_ADMIN"]
 #[tokio::test]
 async fn test_plain_tun_queue_has_no_vnet_header() {
     let tun = skip_without_cap_net_admin!(Tun::builder().name("tunplain0").up().build())
         .pop()
         .unwrap();
     let queue: tokio_tun::TunQueue = tun.into();
-    assert_eq!(queue.vnet_hdr_len().unwrap(), 0);
+    assert_eq!(queue.vnet_hdr_len(), 0);
 }
 
+#[ignore = "requires root/CAP_NET_ADMIN"]
 #[tokio::test]
 async fn test_multi_queue_offload_must_match() {
     let tuns = skip_without_cap_net_admin!(
@@ -559,11 +727,11 @@ async fn test_multi_queue_offload_must_match() {
         Ok(_) => panic!("attaching without .offload() unexpectedly succeeded"),
         Err(err) => err,
     };
-    let tokio_tun::Error::IoError(err) = err;
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     drop(tuns);
 }
 
+#[ignore = "requires root/CAP_NET_ADMIN"]
 #[tokio::test]
 async fn test_multi_queue_without_offload_rejects_offload_attach() {
     let tuns =
@@ -579,13 +747,49 @@ async fn test_multi_queue_without_offload_rejects_offload_attach() {
         Ok(_) => panic!("attaching with .offload() unexpectedly succeeded"),
         Err(err) => err,
     };
-    let tokio_tun::Error::IoError(err) = err;
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     drop(tuns);
 }
 
+struct PersistCleanup {
+    name: &'static str,
+    armed: bool,
+}
+
+impl PersistCleanup {
+    fn clear(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.armed = false;
+        // Reattach by name, clear persistence, and close the descriptor. The
+        // guard is declared before the test's devices, so on panic it runs
+        // after they have been dropped and can acquire the last queue.
+        if let Ok(mut tuns) = Tun::builder().name(self.name).build()
+            && let Some(tun) = tuns.pop()
+        {
+            // SAFETY: `tun` owns an open TUN descriptor and TUNSETPERSIST takes
+            // an integer value.
+            unsafe {
+                libc::ioctl(tun.as_raw_fd(), libc::TUNSETPERSIST, 0);
+            }
+        }
+    }
+}
+
+impl Drop for PersistCleanup {
+    fn drop(&mut self) {
+        self.clear();
+    }
+}
+
+#[ignore = "requires root/CAP_NET_ADMIN"]
 #[tokio::test]
 async fn test_persistent_offload_reattach_without_offload_clears_features() {
+    let mut cleanup = PersistCleanup {
+        name: "tunpersistoff0",
+        armed: false,
+    };
     let tun = skip_without_cap_net_admin!(
         Tun::builder()
             .name("tunpersistoff0")
@@ -598,6 +802,7 @@ async fn test_persistent_offload_reattach_without_offload_clears_features() {
     )
     .pop()
     .unwrap();
+    cleanup.armed = true;
     assert_eq!(tun.vnet_hdr_len(), tokio_tun::VIRTIO_NET_HDR_LEN);
     drop(tun);
 
@@ -616,15 +821,17 @@ async fn test_persistent_offload_reattach_without_offload_clears_features() {
 
     let mut packet = vec![0u8; 65_535];
     let n = loop {
-        let n = tokio::time::timeout(std::time::Duration::from_secs(3), queue.recv(&mut packet))
-            .await
-            .expect("persistent offload packet timed out")
-            .unwrap();
-        if packet[..n]
+        let received =
+            tokio::time::timeout(std::time::Duration::from_secs(3), queue.recv(&mut packet))
+                .await
+                .expect("persistent offload packet timed out")
+                .unwrap();
+        if received
+            .payload()
             .windows(b"persistent offload packet".len())
-            .any(|w| w == b"persistent offload packet")
+            .any(|window| window == b"persistent offload packet")
         {
-            break n;
+            break received.len();
         }
     };
     let packet = &packet[..n];
@@ -640,11 +847,10 @@ async fn test_persistent_offload_reattach_without_offload_clears_features() {
     assert_ne!([udp[6], udp[7]], [0, 0], "UDP checksum was not computed");
     assert_eq!(udp_checksum(packet, ip_header_len, udp_len), 0);
 
-    // Remove the persistent device so repeated test runs start cleanly.
-    unsafe {
-        libc::ioctl(queue.as_raw_fd(), libc::TUNSETPERSIST, 0);
-    }
+    // Remove the persistent device so repeated test runs start cleanly. The
+    // guard also does this if an assertion above panics.
     drop(queue);
+    cleanup.clear();
     assert_eq!(interface_index("tunpersistoff0"), 0);
 }
 

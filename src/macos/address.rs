@@ -47,9 +47,14 @@ pub(crate) fn sockaddr_v4(address: Ipv4Addr) -> libc::sockaddr {
         sin_zero: [0; 8],
     };
 
-    // SAFETY: `sockaddr_in` and `sockaddr` are both 16 bytes and the address
-    // bytes are copied without interpretation.
-    unsafe { mem::transmute(address) }
+    // SAFETY: `sockaddr_in` and `sockaddr` are both 16 bytes on Darwin and
+    // the address bytes are copied without interpretation; the size pins
+    // below are a compile-time guarantee for the transmute.
+    unsafe {
+        const _: () = assert!(mem::size_of::<libc::sockaddr_in>() == 16);
+        const _: () = assert!(mem::size_of::<libc::sockaddr>() == 16);
+        mem::transmute(address)
+    }
 }
 
 pub(crate) fn sockaddr_v6(address: Ipv6Addr) -> libc::sockaddr_in6 {

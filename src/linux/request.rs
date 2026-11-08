@@ -37,8 +37,19 @@ pub union ifreq_ifru {
     pub ifru_slave: [c_char; 16usize],
     pub ifru_newname: [c_char; 16usize],
     pub ifru_data: *mut c_char,
+    // The kernel's `struct ifreq` is 40 bytes on 64-bit targets and 32 bytes
+    // on 32-bit targets. Every field this crate uses lies in the first 32
+    // bytes, but matching the kernel size keeps future field additions safe.
+    #[cfg(target_pointer_width = "64")]
     align: [u64; 3usize],
+    #[cfg(target_pointer_width = "32")]
+    align: [u64; 2usize],
 }
+
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(mem::size_of::<ifreq>() == 40);
+#[cfg(target_pointer_width = "32")]
+const _: () = assert!(mem::size_of::<ifreq>() == 32);
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -60,6 +71,7 @@ pub struct ifmap {
 
 impl ifreq {
     pub fn new(name: &str) -> Self {
+        // SAFETY: `ifreq` is a C POD type and all-zero is valid.
         let mut req: ifreq = unsafe { mem::zeroed() };
         if !name.is_empty() {
             let mut len = name.len().min(IFNAMSIZ as usize - 1);
@@ -67,6 +79,8 @@ impl ifreq {
             while len > 0 && !name.is_char_boundary(len) {
                 len -= 1;
             }
+            // SAFETY: `len` is bounded by IFNAMSIZ - 1 and stays on a UTF-8
+            // boundary; the destination is the zeroed name buffer.
             unsafe {
                 ptr::copy_nonoverlapping(
                     name.as_ptr().cast::<c_char>(),
@@ -79,6 +93,8 @@ impl ifreq {
     }
 
     pub fn name(&self) -> std::result::Result<&str, std::str::Utf8Error> {
+        // SAFETY: `ifrn_name` is zeroed by `new` and the kernel writes a
+        // NUL-terminated name on success.
         let bytes = unsafe { CStr::from_ptr(self.ifr_ifrn.ifrn_name.as_ptr()).to_bytes() };
         str::from_utf8(bytes)
     }

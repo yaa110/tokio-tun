@@ -3,7 +3,6 @@ use super::address::{
     prefix_len_from_ipv6_mask, prefix_to_ipv4_mask, prefix_to_ipv6_mask, sockaddr_v4, sockaddr_v6,
 };
 use super::params::{Params, parse_utun_name};
-use crate::Result;
 use crate::address::{AddressConfig, AddressInfo};
 use std::ffi::{CStr, CString};
 use std::io;
@@ -17,8 +16,9 @@ const UTUN_CONTROL_NAME: &[u8] = b"com.apple.net.utun_control";
 // minimum header is sa_len, sa_family, and sin_port.
 const IPV4_SOCKADDR_LEN: usize = 4;
 
-// These Darwin ABI items were added to libc after 0.2.186. Define them
-// locally so the crate can keep its `libc = "0.2"` requirement.
+// These Darwin ABI items are not exposed by the supported `libc` range
+// (`>= 0.2.186`); define them locally so the crate does not depend on a newer
+// libc for these ioctl constants.
 const SIOCAIFADDR: libc::c_ulong = 0x8040_691a;
 const SIOCGIFMTU: libc::c_ulong = 0xc020_6933;
 const SIOCSIFMTU: libc::c_ulong = 0x8020_6934;
@@ -65,7 +65,7 @@ pub struct Interface {
 }
 
 impl Interface {
-    pub fn new(params: &Params) -> Result<Self> {
+    pub fn new(params: &Params) -> io::Result<Self> {
         let requested_name = params.name.as_deref().unwrap_or("");
         let unit = parse_utun_name(requested_name).ok_or_else(|| {
             io::Error::new(
@@ -80,8 +80,7 @@ impl Interface {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "kernel assigned a different utun name",
-            )
-            .into());
+            ));
         }
         let index = if_nametoindex(&name)?;
         let socket = create_socket(libc::AF_INET, params.cloexec)?;
@@ -104,7 +103,8 @@ impl Interface {
         })
     }
 
-    pub fn init(&self, params: &Params) -> Result<()> {
+    pub fn init(&self, params: &Params) -> io::Result<()> {
+        self.index()?;
         if let Some(mtu) = params.mtu {
             self.mtu(Some(mtu))?;
         }
@@ -125,11 +125,27 @@ impl Interface {
         self.name.as_str()
     }
 
-    pub fn index(&self) -> Result<u32> {
+    pub fn index(&self) -> io::Result<u32> {
+        let mut name = [0 as libc::c_char; libc::IFNAMSIZ];
+        // SAFETY: `name` is a writable IFNAMSIZ buffer and `self.index` is a
+        // previously resolved interface index.
+        let resolved = unsafe { libc::if_indextoname(self.index, name.as_mut_ptr()) };
+        if resolved.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `if_indextoname` returned a NUL-terminated name.
+        let resolved = unsafe { CStr::from_ptr(resolved) };
+        if resolved.to_bytes() != self.name.as_bytes() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "interface identity changed",
+            ));
+        }
         Ok(self.index)
     }
 
-    pub fn mtu(&self, mtu: Option<i32>) -> Result<i32> {
+    pub fn mtu(&self, mtu: Option<i32>) -> io::Result<i32> {
+        self.index()?;
         let mut req = ifreq_for(&self.name);
         if let Some(mtu) = mtu {
             req.ifr_ifru.ifru_mtu = mtu;
@@ -137,21 +153,26 @@ impl Interface {
             Ok(mtu)
         } else {
             ioctl_mut(self.socket, SIOCGIFMTU, &mut req)?;
+            // SAFETY: a successful SIOCGIFMTU initialized `ifru_mtu`.
             Ok(unsafe { req.ifr_ifru.ifru_mtu })
         }
     }
 
-    pub fn flags(&self, flags: Option<i16>) -> Result<i16> {
+    pub fn flags(&self, flags: Option<i16>) -> io::Result<u32> {
+        self.index()?;
         let mut req = ifreq_for(&self.name);
         ioctl_mut(self.socket, SIOCGIFFLAGS, &mut req)?;
         if let Some(flags) = flags {
+            // SAFETY: the union was initialized by SIOCGIFFLAGS above.
             unsafe { req.ifr_ifru.ifru_flags |= flags };
             ioctl_const(self.socket, SIOCSIFFLAGS, &req)?;
         }
-        Ok(unsafe { req.ifr_ifru.ifru_flags })
+        // SAFETY: the union was initialized by SIOCGIFFLAGS above.
+        Ok(u16::from_ne_bytes(unsafe { req.ifr_ifru.ifru_flags }.to_ne_bytes()) as u32)
     }
 
-    pub fn netmask(&self) -> Result<Ipv4Addr> {
+    pub fn netmask(&self) -> io::Result<Ipv4Addr> {
+        self.index()?;
         let addresses = self.addresses()?;
         let address = addresses
             .iter()
@@ -165,16 +186,17 @@ impl Interface {
         Ok(prefix_to_ipv4_mask(address.prefix_len))
     }
 
-    pub fn addresses(&self) -> Result<Vec<AddressInfo>> {
+    pub fn addresses(&self) -> io::Result<Vec<AddressInfo>> {
+        self.index()?;
         Self::addresses_for(&self.name)
     }
 
-    fn addresses_for(interface: &str) -> Result<Vec<AddressInfo>> {
+    fn addresses_for(interface: &str) -> io::Result<Vec<AddressInfo>> {
         let mut ifap: *mut libc::ifaddrs = ptr::null_mut();
         // SAFETY: `ifap` is a valid out-pointer and the returned list is
         // released by the `Ifaddrs` guard below.
         if unsafe { libc::getifaddrs(&mut ifap) } != 0 {
-            return Err(io::Error::last_os_error().into());
+            return Err(io::Error::last_os_error());
         }
         let _guard = Ifaddrs(ifap);
 
@@ -196,10 +218,9 @@ impl Interface {
             }
 
             // SAFETY: `ifa_addr` is non-null and points to a valid sockaddr.
-            match unsafe { (*ifa.ifa_addr).sa_family as i32 } {
+            match sockaddr_family(ifa.ifa_addr) {
                 libc::AF_INET if sockaddr_is(ifa.ifa_addr, libc::AF_INET, IPV4_SOCKADDR_LEN) => {
-                    // SAFETY: `ifa_addr` is non-null and AF_INET.
-                    let len = unsafe { (*ifa.ifa_addr).sa_len as usize };
+                    let len = sockaddr_len(ifa.ifa_addr);
                     let address = ipv4_from_sockaddr(ifa.ifa_addr, len);
                     let prefix_len = Self::ipv4_prefix_len(ifa);
                     let destination = Self::ipv4_destination(ifa, address);
@@ -236,13 +257,12 @@ impl Interface {
         Ok(addresses)
     }
 
-    fn add_address(&self, config: &AddressConfig) -> Result<()> {
+    fn add_address(&self, config: &AddressConfig) -> io::Result<()> {
         if config.broadcast.is_some() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "broadcast addresses are not supported on macOS utun devices",
-            )
-            .into());
+            ));
         }
         match config.address {
             IpAddr::V4(address) => {
@@ -259,15 +279,14 @@ impl Interface {
         address: Ipv4Addr,
         prefix_len: u8,
         destination: Option<IpAddr>,
-    ) -> Result<()> {
+    ) -> io::Result<()> {
         let peer = match destination {
             Some(IpAddr::V4(peer)) => peer,
             Some(_) => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "destination address family must match the address family",
-                )
-                .into());
+                ));
             }
             None => address,
         };
@@ -286,13 +305,12 @@ impl Interface {
         address: Ipv6Addr,
         prefix_len: u8,
         destination: Option<IpAddr>,
-    ) -> Result<()> {
+    ) -> io::Result<()> {
         if destination.is_some() && prefix_len != 128 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "macOS utun requires IPv6 destinations to use a /128 prefix",
-            )
-            .into());
+            ));
         }
         let socket6 = self
             .socket6
@@ -310,8 +328,7 @@ impl Interface {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
                         "destination address family must match the address family",
-                    )
-                    .into());
+                    ));
                 }
             }
         }
@@ -325,8 +342,7 @@ impl Interface {
         if !sockaddr_is(ifa.ifa_netmask, libc::AF_INET, IPV4_SOCKADDR_LEN) {
             return 0;
         }
-        // SAFETY: `ifa_netmask` is non-null, AF_INET, and at least 4 bytes.
-        let len = unsafe { (*ifa.ifa_netmask).sa_len as usize };
+        let len = sockaddr_len(ifa.ifa_netmask);
         prefix_len_from_ipv4_mask(ipv4_from_sockaddr(ifa.ifa_netmask, len))
     }
 
@@ -347,8 +363,7 @@ impl Interface {
         if !sockaddr_is(ifa.ifa_dstaddr, libc::AF_INET, IPV4_SOCKADDR_LEN) {
             return None;
         }
-        // SAFETY: `ifa_dstaddr` is non-null, AF_INET, and at least 4 bytes.
-        let len = unsafe { (*ifa.ifa_dstaddr).sa_len as usize };
+        let len = sockaddr_len(ifa.ifa_dstaddr);
         let destination = ipv4_from_sockaddr(ifa.ifa_dstaddr, len);
         (!destination.is_unspecified() && destination != address).then_some(IpAddr::V4(destination))
     }
@@ -385,14 +400,24 @@ impl Drop for Interface {
     }
 }
 
+fn sockaddr_len(ptr: *const libc::sockaddr) -> usize {
+    // SAFETY: every getifaddrs sockaddr starts with the one-byte `sa_len`.
+    unsafe { ptr.cast::<u8>().read() as usize }
+}
+
+fn sockaddr_family(ptr: *const libc::sockaddr) -> i32 {
+    // SAFETY: every getifaddrs sockaddr has the one-byte `sa_family` at offset
+    // 1. This intentionally avoids forming a `&sockaddr`, because Darwin may
+    // report a short IPv4 netmask (for example `sa_len == 5`) even though
+    // `size_of::<sockaddr>()` is 16.
+    unsafe { ptr.cast::<u8>().add(1).read() as i32 }
+}
+
 fn sockaddr_is(ptr: *const libc::sockaddr, family: i32, len: usize) -> bool {
     if ptr.is_null() {
         return false;
     }
-    // SAFETY: `ptr` comes from `getifaddrs` and is non-null; reading the
-    // `sockaddr` header is valid.
-    let sockaddr = unsafe { &*ptr };
-    sockaddr.sa_family as i32 == family && sockaddr.sa_len as usize >= len
+    sockaddr_family(ptr) == family && sockaddr_len(ptr) >= len
 }
 
 struct Ifaddrs(*mut libc::ifaddrs);
@@ -400,15 +425,18 @@ struct Ifaddrs(*mut libc::ifaddrs);
 impl Drop for Ifaddrs {
     fn drop(&mut self) {
         if !self.0.is_null() {
+            // SAFETY: the list was allocated by getifaddrs and is owned here.
             unsafe { libc::freeifaddrs(self.0) };
         }
     }
 }
 
-fn create_utun(unit: u32, cloexec: bool) -> Result<OwnedFd> {
+fn create_utun(unit: u32, cloexec: bool) -> io::Result<OwnedFd> {
+    // SAFETY: `socket` is called with valid constants and returns an owned
+    // descriptor or -1.
     let fd = unsafe { libc::socket(libc::PF_SYSTEM, libc::SOCK_DGRAM, libc::SYSPROTO_CONTROL) };
     if fd < 0 {
-        return Err(io::Error::last_os_error().into());
+        return Err(io::Error::last_os_error());
     }
     // SAFETY: `fd` is a valid, owned descriptor.
     let fd = unsafe { OwnedFd::from_raw_fd(fd) };
@@ -434,6 +462,8 @@ fn create_utun(unit: u32, cloexec: bool) -> Result<OwnedFd> {
         sc_reserved: [0; 5],
     };
 
+    // SAFETY: `address` is a fully initialized `sockaddr_ctl`, the length is
+    // correct, and `fd` is an open control socket owned by this function.
     let result = unsafe {
         libc::connect(
             fd.as_raw_fd(),
@@ -442,17 +472,19 @@ fn create_utun(unit: u32, cloexec: bool) -> Result<OwnedFd> {
         )
     };
     if result < 0 {
-        return Err(io::Error::last_os_error().into());
+        return Err(io::Error::last_os_error());
     }
 
     set_nonblocking(fd.as_raw_fd())?;
     Ok(fd)
 }
 
-fn create_socket(family: i32, cloexec: bool) -> Result<OwnedFd> {
+fn create_socket(family: i32, cloexec: bool) -> io::Result<OwnedFd> {
+    // SAFETY: `socket` is called with valid constants and returns an owned
+    // descriptor or -1.
     let fd = unsafe { libc::socket(family, libc::SOCK_DGRAM, 0) };
     if fd < 0 {
-        return Err(io::Error::last_os_error().into());
+        return Err(io::Error::last_os_error());
     }
     // SAFETY: `fd` is a valid, owned descriptor.
     let fd = unsafe { OwnedFd::from_raw_fd(fd) };
@@ -462,9 +494,11 @@ fn create_socket(family: i32, cloexec: bool) -> Result<OwnedFd> {
     Ok(fd)
 }
 
-fn utun_name(fd: i32) -> Result<String> {
+fn utun_name(fd: i32) -> io::Result<String> {
     let mut buffer = [0u8; 256];
     let mut len = buffer.len() as libc::socklen_t;
+    // SAFETY: `buffer` is writable, `len` describes its size, and `fd` is an
+    // open utun control socket.
     let result = unsafe {
         libc::getsockopt(
             fd,
@@ -475,7 +509,7 @@ fn utun_name(fd: i32) -> Result<String> {
         )
     };
     if result < 0 {
-        return Err(io::Error::last_os_error().into());
+        return Err(io::Error::last_os_error());
     }
 
     let len = (len as usize).min(buffer.len());
@@ -483,47 +517,47 @@ fn utun_name(fd: i32) -> Result<String> {
         .iter()
         .position(|byte| *byte == 0)
         .unwrap_or(len);
-    String::from_utf8(buffer[..end].to_vec()).map_err(|_| {
-        io::Error::new(io::ErrorKind::InvalidData, "utun name is not valid UTF-8").into()
-    })
+    String::from_utf8(buffer[..end].to_vec())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "utun name is not valid UTF-8"))
 }
 
-fn if_nametoindex(name: &str) -> Result<u32> {
+fn if_nametoindex(name: &str) -> io::Result<u32> {
     let name = CString::new(name).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
             "interface name contains a NUL byte",
         )
     })?;
+    // SAFETY: `name` is NUL-terminated and valid for the call.
     let index = unsafe { libc::if_nametoindex(name.as_ptr()) };
     if index == 0 {
-        return Err(io::Error::last_os_error().into());
+        return Err(io::Error::last_os_error());
     }
     Ok(index)
 }
 
-fn set_nonblocking(fd: i32) -> Result<()> {
+fn set_nonblocking(fd: i32) -> io::Result<()> {
     // SAFETY: `fd` is an open descriptor owned by the caller.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
     if flags < 0 {
-        return Err(io::Error::last_os_error().into());
+        return Err(io::Error::last_os_error());
     }
     // SAFETY: `fd` is an open descriptor and `flags` came from F_GETFL.
     if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
-        return Err(io::Error::last_os_error().into());
+        return Err(io::Error::last_os_error());
     }
     Ok(())
 }
 
-fn set_cloexec(fd: i32) -> Result<()> {
+fn set_cloexec(fd: i32) -> io::Result<()> {
     // SAFETY: `fd` is an open descriptor owned by the caller.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
     if flags < 0 {
-        return Err(io::Error::last_os_error().into());
+        return Err(io::Error::last_os_error());
     }
     // SAFETY: `fd` is an open descriptor and `flags` came from F_GETFD.
     if unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
-        return Err(io::Error::last_os_error().into());
+        return Err(io::Error::last_os_error());
     }
     Ok(())
 }
@@ -546,20 +580,20 @@ fn write_ifname(dst: &mut [libc::c_char], name: &str) {
     }
 }
 
-fn ioctl_mut<T>(fd: i32, request: libc::c_ulong, arg: &mut T) -> Result<()> {
+fn ioctl_mut<T>(fd: i32, request: libc::c_ulong, arg: &mut T) -> io::Result<()> {
     // SAFETY: the caller provides a valid, writable pointer for `request`.
     let result = unsafe { libc::ioctl(fd, request, arg as *mut T) };
     if result < 0 {
-        return Err(io::Error::last_os_error().into());
+        return Err(io::Error::last_os_error());
     }
     Ok(())
 }
 
-fn ioctl_const<T>(fd: i32, request: libc::c_ulong, arg: &T) -> Result<()> {
+fn ioctl_const<T>(fd: i32, request: libc::c_ulong, arg: &T) -> io::Result<()> {
     // SAFETY: the caller provides a valid pointer for `request`.
     let result = unsafe { libc::ioctl(fd, request, arg as *const T) };
     if result < 0 {
-        return Err(io::Error::last_os_error().into());
+        return Err(io::Error::last_os_error());
     }
     Ok(())
 }
@@ -590,8 +624,10 @@ mod tests {
 
     #[test]
     fn reads_short_ipv4_netmask() {
+        // SAFETY: `sockaddr`/`ifaddrs` are C POD types; all-zero is valid.
         let mut mask: libc::sockaddr = unsafe { mem::zeroed() };
         mask.sa_family = libc::AF_INET as u8;
+        // SAFETY: `ifaddrs` is a C POD type; all-zero is valid.
         let mut ifa: libc::ifaddrs = unsafe { mem::zeroed() };
         ifa.ifa_netmask = &mut mask;
 
@@ -620,7 +656,9 @@ mod tests {
         let address: Ipv6Addr = "fd00:1::1".parse().unwrap();
         let mut addr = sockaddr_v6(address);
         let mut mask = sockaddr_v6(prefix_to_ipv6_mask(128));
+        // SAFETY: `sockaddr`/`ifaddrs` are C POD types; all-zero is valid.
         let mut dst: libc::sockaddr = unsafe { mem::zeroed() };
+        // SAFETY: `ifaddrs` is a C POD type; all-zero is valid.
         let mut ifa: libc::ifaddrs = unsafe { mem::zeroed() };
         ifa.ifa_addr = &mut addr as *mut _ as *mut libc::sockaddr;
         ifa.ifa_netmask = &mut mask as *mut _ as *mut libc::sockaddr;
@@ -637,6 +675,7 @@ mod tests {
         let mut addr = sockaddr_v6(address);
         let mut mask = sockaddr_v6(prefix_to_ipv6_mask(128));
         let mut dst = sockaddr_v6(peer);
+        // SAFETY: `ifaddrs` is a C POD type; all-zero is valid.
         let mut ifa: libc::ifaddrs = unsafe { mem::zeroed() };
         ifa.ifa_addr = &mut addr as *mut _ as *mut libc::sockaddr;
         ifa.ifa_netmask = &mut mask as *mut _ as *mut libc::sockaddr;
@@ -649,7 +688,21 @@ mod tests {
     }
 
     #[test]
+    fn reads_short_sockaddr_header_without_full_reference() {
+        // Darwin may report a short IPv4 netmask (sa_len == 5). The helpers
+        // must read only the header bytes, never form a full `&sockaddr`.
+        let mut short = [0u8; 5];
+        short[0] = 5;
+        short[1] = libc::AF_INET as u8;
+        let ptr = short.as_ptr().cast::<libc::sockaddr>();
+        assert_eq!(sockaddr_len(ptr), 5);
+        assert_eq!(sockaddr_family(ptr), libc::AF_INET);
+        assert!(sockaddr_is(ptr, libc::AF_INET, IPV4_SOCKADDR_LEN));
+    }
+
+    #[test]
     fn validates_sockaddr_family_and_length() {
+        // SAFETY: `sockaddr` is a C POD type; all-zero is valid.
         let mut sockaddr: libc::sockaddr = unsafe { mem::zeroed() };
         let len = mem::size_of::<libc::sockaddr_in6>();
 
@@ -661,6 +714,7 @@ mod tests {
         assert!(!sockaddr_is(&sockaddr, libc::AF_INET6, len));
         assert!(!sockaddr_is(ptr::null(), libc::AF_INET6, len));
 
+        // SAFETY: `sockaddr` is a C POD type; all-zero is valid.
         let mut sockaddr4: libc::sockaddr = unsafe { mem::zeroed() };
         sockaddr4.sa_len = IPV4_SOCKADDR_LEN as u8;
         sockaddr4.sa_family = libc::AF_INET as u8;

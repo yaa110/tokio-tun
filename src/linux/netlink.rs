@@ -1,4 +1,3 @@
-use crate::Result;
 use crate::address::{AddressConfig, AddressInfo};
 use std::io;
 use std::mem;
@@ -25,20 +24,23 @@ fn align(len: usize) -> usize {
     (len + 3) & !3
 }
 
-fn invalid_data(message: &'static str) -> crate::Error {
-    io::Error::new(io::ErrorKind::InvalidData, message).into()
+fn invalid_data(message: &'static str) -> std::io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
-fn push_attr(buf: &mut Vec<u8>, kind: u16, data: &[u8]) {
+fn push_attr(buf: &mut Vec<u8>, kind: u16, data: &[u8]) -> io::Result<()> {
     let len = RTATTR_LEN + data.len();
-    assert!(len <= u16::MAX as usize, "netlink attribute is too large");
+    if len > u16::MAX as usize {
+        return Err(invalid_data("netlink attribute is too large"));
+    }
     buf.extend_from_slice(&(len as u16).to_ne_bytes());
     buf.extend_from_slice(&kind.to_ne_bytes());
     buf.extend_from_slice(data);
     buf.resize(buf.len() + align(len) - len, 0);
+    Ok(())
 }
 
-fn push_attr_ip(buf: &mut Vec<u8>, kind: u16, address: IpAddr) {
+fn push_attr_ip(buf: &mut Vec<u8>, kind: u16, address: IpAddr) -> io::Result<()> {
     match address {
         IpAddr::V4(address) => push_attr(buf, kind, &address.octets()),
         IpAddr::V6(address) => push_attr(buf, kind, &address.octets()),
@@ -60,7 +62,7 @@ struct NetlinkSocket {
 }
 
 impl NetlinkSocket {
-    fn new() -> Result<Self> {
+    fn new() -> io::Result<Self> {
         // SAFETY: socket(2) returns a valid, owned descriptor on success.
         let fd = unsafe {
             libc::socket(
@@ -70,11 +72,12 @@ impl NetlinkSocket {
             )
         };
         if fd < 0 {
-            return Err(io::Error::last_os_error().into());
+            return Err(io::Error::last_os_error());
         }
         // SAFETY: `fd` is a valid, owned descriptor.
         let fd = unsafe { OwnedFd::from_raw_fd(fd) };
 
+        // SAFETY: `sockaddr_nl` is a C POD type and all-zero is valid.
         let mut local: libc::sockaddr_nl = unsafe { mem::zeroed() };
         local.nl_family = libc::AF_NETLINK as _;
         // SAFETY: `local` is a valid `sockaddr_nl` and the length is correct.
@@ -86,7 +89,7 @@ impl NetlinkSocket {
             )
         } < 0
         {
-            return Err(io::Error::last_os_error().into());
+            return Err(io::Error::last_os_error());
         }
 
         // Strict checking lets the kernel filter RTM_GETADDR dumps by ifindex.
@@ -104,6 +107,7 @@ impl NetlinkSocket {
             );
         }
 
+        // SAFETY: `sockaddr_nl` is a C POD type and all-zero is valid.
         let mut bound: libc::sockaddr_nl = unsafe { mem::zeroed() };
         let mut bound_len = mem::size_of::<libc::sockaddr_nl>() as libc::socklen_t;
         // SAFETY: `bound` is writable and `bound_len` describes its size.
@@ -115,7 +119,7 @@ impl NetlinkSocket {
             )
         } < 0
         {
-            return Err(io::Error::last_os_error().into());
+            return Err(io::Error::last_os_error());
         }
 
         Ok(Self {
@@ -124,7 +128,8 @@ impl NetlinkSocket {
         })
     }
 
-    fn send(&self, message: &[u8]) -> Result<()> {
+    fn send(&self, message: &[u8]) -> io::Result<()> {
+        // SAFETY: `sockaddr_nl` is a C POD type and all-zero is valid.
         let mut kernel: libc::sockaddr_nl = unsafe { mem::zeroed() };
         kernel.nl_family = libc::AF_NETLINK as _;
         // SAFETY: `message` is a valid netlink request and `kernel` is a valid
@@ -140,18 +145,24 @@ impl NetlinkSocket {
             )
         };
         if sent < 0 {
-            return Err(io::Error::last_os_error().into());
+            return Err(io::Error::last_os_error());
         }
         if sent as usize != message.len() {
-            return Err(io::Error::new(io::ErrorKind::WriteZero, "short netlink write").into());
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "short netlink write",
+            ));
         }
         Ok(())
     }
 
-    fn set_receive_timeout(&self, remaining: Duration) -> Result<()> {
+    fn set_receive_timeout(&self, remaining: Duration) -> io::Result<()> {
         let timeout = libc::timeval {
             tv_sec: remaining.as_secs().min(libc::time_t::MAX as u64) as libc::time_t,
-            tv_usec: remaining.subsec_micros() as libc::suseconds_t,
+            // A zero `tv_sec`/`tv_usec` disables SO_RCVTIMEO on Linux. Clamp to
+            // one microsecond so a sub-microsecond remaining deadline cannot
+            // turn the receive into an unbounded block.
+            tv_usec: remaining.subsec_micros().max(1) as libc::suseconds_t,
         };
         // SAFETY: `timeout` is a valid `timeval` of the given length.
         if unsafe {
@@ -164,35 +175,37 @@ impl NetlinkSocket {
             )
         } < 0
         {
-            return Err(io::Error::last_os_error().into());
+            return Err(io::Error::last_os_error());
         }
         Ok(())
     }
 
-    fn receive(&self, buf: &mut [u8], deadline: Instant) -> Result<usize> {
+    fn receive(&self, buf: &mut [u8], deadline: Instant) -> io::Result<usize> {
         loop {
             let now = Instant::now();
             if now >= deadline {
-                return Err(
-                    io::Error::new(io::ErrorKind::TimedOut, "netlink receive timed out").into(),
-                );
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "netlink receive timed out",
+                ));
             }
             self.set_receive_timeout(deadline - now)?;
 
+            // SAFETY: `sockaddr_nl` and `msghdr` are C POD types and all-zero
+            // is valid.
             let mut source: libc::sockaddr_nl = unsafe { mem::zeroed() };
-            let mut source_len = mem::size_of::<libc::sockaddr_nl>() as libc::socklen_t;
-            // SAFETY: `buf` is writable for its full length and `source` is a
-            // valid, writable `sockaddr_nl`.
-            let received = unsafe {
-                libc::recvfrom(
-                    self.fd.as_raw_fd(),
-                    buf.as_mut_ptr().cast(),
-                    buf.len(),
-                    0,
-                    &mut source as *mut _ as *mut libc::sockaddr,
-                    &mut source_len,
-                )
+            let mut iov = libc::iovec {
+                iov_base: buf.as_mut_ptr().cast(),
+                iov_len: buf.len(),
             };
+            let mut message: libc::msghdr = unsafe { mem::zeroed() };
+            message.msg_name = &mut source as *mut _ as *mut libc::c_void;
+            message.msg_namelen = mem::size_of::<libc::sockaddr_nl>() as libc::socklen_t;
+            message.msg_iov = &mut iov;
+            message.msg_iovlen = 1;
+            // SAFETY: `buf` is writable for its full length, `iov` points to
+            // it, and `source` is a writable `sockaddr_nl`.
+            let received = unsafe { libc::recvmsg(self.fd.as_raw_fd(), &mut message, 0) };
             if received < 0 {
                 let err = io::Error::last_os_error();
                 if err.kind() == io::ErrorKind::Interrupted {
@@ -203,17 +216,22 @@ impl NetlinkSocket {
                         return Err(io::Error::new(
                             io::ErrorKind::TimedOut,
                             "netlink receive timed out",
-                        )
-                        .into());
+                        ));
                     }
                     continue;
                 }
-                return Err(err.into());
+                return Err(err);
             }
             // Ignore datagrams that did not come from the kernel. The operation
             // deadline still bounds how long we wait.
             if source.nl_pid != 0 {
                 continue;
+            }
+            if message.msg_flags & libc::MSG_TRUNC != 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "netlink datagram was truncated; the address dump is incomplete",
+                ));
             }
             return Ok(received as usize);
         }
@@ -226,7 +244,7 @@ fn read_header(buf: &[u8], offset: usize) -> libc::nlmsghdr {
     unsafe { std::ptr::read_unaligned(buf[offset..].as_ptr() as *const libc::nlmsghdr) }
 }
 
-fn read_i32_payload(buf: &[u8], offset: usize, message_len: usize) -> Result<i32> {
+fn read_i32_payload(buf: &[u8], offset: usize, message_len: usize) -> io::Result<i32> {
     if message_len < NLMSG_HDRLEN + mem::size_of::<i32>() {
         return Err(invalid_data("truncated netlink response"));
     }
@@ -235,17 +253,21 @@ fn read_i32_payload(buf: &[u8], offset: usize, message_len: usize) -> Result<i32
     Ok(unsafe { std::ptr::read_unaligned(buf[offset + NLMSG_HDRLEN..].as_ptr() as *const i32) })
 }
 
-fn netlink_error(error: i32) -> Result<()> {
+fn netlink_error(error: i32) -> io::Result<()> {
     if error == 0 {
         return Ok(());
     }
     if error < 0 && error != i32::MIN {
-        return Err(io::Error::from_raw_os_error(-error).into());
+        return Err(io::Error::from_raw_os_error(-error));
     }
     Err(invalid_data("invalid netlink error code"))
 }
 
-pub(crate) fn encode_newaddr(seq: u32, ifindex: u32, config: &AddressConfig) -> Result<Vec<u8>> {
+pub(crate) fn encode_newaddr(
+    seq: u32,
+    ifindex: u32,
+    config: &AddressConfig,
+) -> io::Result<Vec<u8>> {
     config
         .validate()
         .map_err(|reason| io::Error::new(io::ErrorKind::InvalidInput, reason))?;
@@ -274,14 +296,14 @@ pub(crate) fn encode_newaddr(seq: u32, ifindex: u32, config: &AddressConfig) -> 
     message.push(address_scope(config.address));
     message.extend_from_slice(&ifindex.to_ne_bytes());
 
-    push_attr_ip(&mut message, libc::IFA_LOCAL, config.address);
+    push_attr_ip(&mut message, libc::IFA_LOCAL, config.address)?;
     push_attr_ip(
         &mut message,
         libc::IFA_ADDRESS,
         config.destination.unwrap_or(config.address),
-    );
+    )?;
     if let Some(broadcast) = config.broadcast {
-        push_attr(&mut message, libc::IFA_BROADCAST, &broadcast.octets());
+        push_attr(&mut message, libc::IFA_BROADCAST, &broadcast.octets())?;
     }
 
     let len = message.len() as u32;
@@ -320,7 +342,7 @@ struct Attrs<'a> {
     broadcast: Option<&'a [u8]>,
 }
 
-fn parse_attrs(attrs: &[u8]) -> Result<Attrs<'_>> {
+fn parse_attrs(attrs: &[u8]) -> io::Result<Attrs<'_>> {
     let mut result = Attrs::default();
     let mut offset = 0;
     while offset + RTATTR_LEN <= attrs.len() {
@@ -341,7 +363,7 @@ fn parse_attrs(attrs: &[u8]) -> Result<Attrs<'_>> {
     Ok(result)
 }
 
-fn parse_ip(family: u8, bytes: &[u8]) -> Result<IpAddr> {
+fn parse_ip(family: u8, bytes: &[u8]) -> io::Result<IpAddr> {
     match family as i32 {
         libc::AF_INET => <[u8; 4]>::try_from(bytes)
             .map(|bytes| IpAddr::V4(Ipv4Addr::from(bytes)))
@@ -353,7 +375,7 @@ fn parse_ip(family: u8, bytes: &[u8]) -> Result<IpAddr> {
     }
 }
 
-fn parse_newaddr(message: &[u8], ifindex: u32) -> Result<Option<AddressInfo>> {
+fn parse_newaddr(message: &[u8], ifindex: u32) -> io::Result<Option<AddressInfo>> {
     if message.len() < NLMSG_HDRLEN + IFADDRMSG_LEN {
         return Err(invalid_data("truncated netlink address message"));
     }
@@ -402,17 +424,13 @@ fn parse_newaddr(message: &[u8], ifindex: u32) -> Result<Option<AddressInfo>> {
     }))
 }
 
-pub fn get_addresses(ifindex: u32) -> Result<Vec<AddressInfo>> {
+pub fn get_addresses(ifindex: u32) -> io::Result<Vec<AddressInfo>> {
     let mut last_error = None;
     for _ in 0..3 {
         match get_addresses_once(ifindex) {
             Ok(addresses) => return Ok(addresses),
             Err(err) => {
-                let interrupted = matches!(
-                    &err,
-                    crate::Error::IoError(io_err)
-                        if io_err.kind() == io::ErrorKind::Interrupted
-                );
+                let interrupted = err.kind() == io::ErrorKind::Interrupted;
                 if !interrupted {
                     return Err(err);
                 }
@@ -424,7 +442,7 @@ pub fn get_addresses(ifindex: u32) -> Result<Vec<AddressInfo>> {
         .unwrap_or_else(|| invalid_data("netlink address dump was interrupted repeatedly")))
 }
 
-fn get_addresses_once(ifindex: u32) -> Result<Vec<AddressInfo>> {
+fn get_addresses_once(ifindex: u32) -> io::Result<Vec<AddressInfo>> {
     let socket = NetlinkSocket::new()?;
     let seq = next_seq();
     let deadline = Instant::now() + NETLINK_RECEIVE_TIMEOUT;
@@ -459,8 +477,7 @@ fn get_addresses_once(ifindex: u32) -> Result<Vec<AddressInfo>> {
                         return Err(io::Error::new(
                             io::ErrorKind::Interrupted,
                             "netlink address dump was interrupted",
-                        )
-                        .into());
+                        ));
                     }
                     let error = read_i32_payload(&reply, offset, message_len)?;
                     netlink_error(error)?;
@@ -476,7 +493,14 @@ fn get_addresses_once(ifindex: u32) -> Result<Vec<AddressInfo>> {
     }
 }
 
-pub fn add_addresses(ifindex: u32, configs: &[AddressConfig]) -> Result<()> {
+fn address_matches(config: &AddressConfig, info: &AddressInfo) -> bool {
+    info.address == config.address
+        && info.prefix_len == config.prefix_len
+        && info.destination == config.destination
+        && info.broadcast == config.broadcast
+}
+
+pub fn add_addresses(ifindex: u32, configs: &[AddressConfig]) -> io::Result<()> {
     if configs.is_empty() {
         return Ok(());
     }
@@ -487,16 +511,45 @@ pub fn add_addresses(ifindex: u32, configs: &[AddressConfig]) -> Result<()> {
     }
 
     let socket = NetlinkSocket::new()?;
-    let deadline = Instant::now() + NETLINK_ADD_TIMEOUT;
     for config in configs {
         let seq = next_seq();
         socket.send(&encode_newaddr(seq, ifindex, config)?)?;
-        wait_for_ack(&socket, seq, deadline)?;
+        // Each address gets its own full deadline: an earlier slow ack must
+        // not drain the budget of the remaining addresses.
+        let deadline = Instant::now() + NETLINK_ADD_TIMEOUT;
+        match wait_for_ack(&socket, seq, deadline) {
+            Ok(()) => {}
+            Err(err) if err.raw_os_error() == Some(libc::EEXIST) => {
+                // `EEXIST` only means an address with the same IP is already
+                // present. Re-running an identical configuration against a
+                // persistent device is idempotent, but a different prefix,
+                // peer, or broadcast must not be silently ignored.
+                let existing = get_addresses(ifindex)?;
+                if !existing.iter().any(|info| address_matches(config, info)) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        format!(
+                            "address {}/{} already exists with different attributes",
+                            config.address, config.prefix_len
+                        ),
+                    ));
+                }
+            }
+            Err(err) => {
+                return Err(io::Error::new(
+                    err.kind(),
+                    format!(
+                        "failed to add address {}/{}: {err}",
+                        config.address, config.prefix_len
+                    ),
+                ));
+            }
+        }
     }
     Ok(())
 }
 
-fn wait_for_ack(socket: &NetlinkSocket, seq: u32, deadline: Instant) -> Result<()> {
+fn wait_for_ack(socket: &NetlinkSocket, seq: u32, deadline: Instant) -> io::Result<()> {
     let mut reply = [0u8; 4096];
     loop {
         let received = socket.receive(&mut reply, deadline)?;
@@ -679,9 +732,38 @@ mod tests {
     }
 
     #[test]
+    fn address_match_compares_prefix_peer_and_broadcast() {
+        let config = AddressConfig {
+            address: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            prefix_len: 24,
+            destination: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
+            broadcast: Some(Ipv4Addr::new(10, 0, 0, 255)),
+        };
+        let mut info = AddressInfo {
+            address: config.address,
+            prefix_len: config.prefix_len,
+            destination: config.destination,
+            broadcast: config.broadcast,
+        };
+        assert!(address_matches(&config, &info));
+
+        info.prefix_len = 25;
+        assert!(!address_matches(&config, &info));
+        info.prefix_len = config.prefix_len;
+
+        info.destination = None;
+        assert!(!address_matches(&config, &info));
+        info.destination = config.destination;
+
+        info.broadcast = None;
+        assert!(!address_matches(&config, &info));
+    }
+
+    #[test]
     fn dumps_loopback_v4_and_v6_addresses() {
         let name = std::ffi::CString::new("lo").unwrap();
         // SAFETY: `name` is a valid NUL-terminated string.
+        // SAFETY: `name` is NUL-terminated and valid for the call.
         let index = unsafe { libc::if_nametoindex(name.as_ptr()) };
         assert_ne!(index, 0);
 

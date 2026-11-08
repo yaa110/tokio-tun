@@ -4,13 +4,29 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+permissions:
+  contents: read
 jobs:
+  msrv:
+    # Language features (such as let-chains) can drift past the
+    # `rust-version` declared in Cargo.toml; pin the declared MSRV here so the
+    # promise is enforced, not just stated. If bumping the MSRV, update both.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2
+        with:
+          toolchain: "1.88"
+          target: x86_64-unknown-freebsd
+      - run: cargo check --all-targets
+      - run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+      - run: cargo check --target x86_64-unknown-freebsd --all-targets
   linux:
     runs-on: ubuntu-latest
     steps:
       - name: test and build
-        uses: actions/checkout@v7
-      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2
         with:
           components: rustfmt, clippy
           target: aarch64-linux-android
@@ -18,17 +34,24 @@ jobs:
       - run: cargo fmt -- --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo build
+      - run: cargo check --all-targets
+      - run: cargo bench --no-run
+      - run: cargo bench --bench throughput
       - run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
       - run: cargo check --target aarch64-linux-android --all-targets
       - run: cargo clippy --target aarch64-linux-android --all-targets -- -D warnings
       - run: RUSTDOCFLAGS="-D warnings" cargo doc --target aarch64-linux-android --no-deps
+      - name: check minimum libc on Linux
+        run: |
+          cargo update -p libc --precise 0.2.186
+          cargo check --all-targets
   macos:
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
       - name: test and build
-        uses: actions/checkout@v7
-      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2
         with:
           components: rustfmt, clippy
           target: aarch64-apple-ios
@@ -71,13 +94,13 @@ jobs:
             "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" \
             "CARGO_TARGET_DIR=$CARGO_TARGET_DIR" \
             "TOKIO_TUN_REQUIRE_PRIVILEGED=$TOKIO_TUN_REQUIRE_PRIVILEGED" \
-            cargo test --test macos_test
+            cargo test --test macos_test -- --ignored
   freebsd:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions-rust-lang/setup-rust-toolchain@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2
         with:
           components: clippy
           target: x86_64-unknown-freebsd
@@ -85,22 +108,23 @@ jobs:
       - run: cargo clippy --target x86_64-unknown-freebsd --all-targets -- -D warnings
       - run: RUSTDOCFLAGS="-D warnings" cargo doc --target x86_64-unknown-freebsd --no-deps
       - name: run tests in FreeBSD VM
-        uses: vmactions/freebsd-vm@v1
+        uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1
         with:
           prepare: pkg install -y rust
           run: |
+            rustc --version | awk '{split($2, v, "."); exit !(v[1] > 1 || (v[1] == 1 && v[2] >= 88))}' || { echo "Rust 1.88+ required"; exit 1; }
             kldload if_tuntap 2>/dev/null || kldload if_tun 2>/dev/null || true
             kldload if_tap 2>/dev/null || true
-            TOKIO_TUN_REQUIRE_PRIVILEGED=1 cargo test
+            TOKIO_TUN_REQUIRE_PRIVILEGED=1 timeout 600 cargo test -- --ignored --test-threads=1
   integration:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - name: checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: actions-rust-lang/setup-rust-toolchain@v2
+      - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2
       - name: prepare /dev/net/tun
         run: |
           sudo mkdir -p /dev/net
@@ -117,4 +141,12 @@ jobs:
             "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" \
             "CARGO_TARGET_DIR=$CARGO_TARGET_DIR" \
             "TOKIO_TUN_REQUIRE_PRIVILEGED=$TOKIO_TUN_REQUIRE_PRIVILEGED" \
-            cargo test
+            cargo test -- --ignored
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2
+      - run: cargo package --list
+      - run: cargo package
+      - run: cargo publish --dry-run

@@ -1,20 +1,39 @@
 [package]
 authors = ["Navid <yaa110@gmail.com>"]
 categories = ["asynchronous", "network-programming"]
-description = "Asynchronous allocation of TUN/TAP devices using tokio"
+description = "Asynchronous TUN/TAP allocation and packet I/O using Tokio"
 documentation = "https://docs.rs/tokio-tun"
 edition = "2024"
-homepage = "https://github.com/yaa110/tokio-tun"
-keywords = ["tun", "tap", "async", "tokio"]
+rust-version = "1.88"
+exclude = [".github"]
+keywords = ["tun", "tap", "vpn", "async", "tokio"]
 license = "MIT OR Apache-2.0"
 name = "tokio-tun"
 readme = "README.md"
 repository = "https://github.com/yaa110/tokio-tun"
-version = "0.23.0"
+version = "1.0.0"
+
+[package.metadata.docs.rs]
+# docs.rs builds every supported platform and exposes them through the
+# "Platform" selector. The Linux x86_64 build is the landing page.
+default-target = "x86_64-unknown-linux-gnu"
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-unknown-freebsd",
+    "aarch64-linux-android",
+    "aarch64-apple-ios",
+]
+# Ensure the `docsrs` cfg is available for `#[cfg_attr(docsrs, doc(cfg(...)))]`.
+rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 libc = "0.2"
 tokio = {version = "1.54", features = ["net"]}
 
 [dev-dependencies]
+proptest = "1.12"
 tokio = {version = "1.54", features = ["full"]}
+
+[[bench]]
+harness = false
+name = "throughput"

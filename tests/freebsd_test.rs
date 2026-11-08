@@ -22,11 +22,14 @@ impl Drop for DestroyDevice {
 static DEVICE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 async fn serial_device_test() -> tokio::sync::MutexGuard<'static, ()> {
-    DEVICE_LOCK.lock().await
+    timeout(Duration::from_secs(30), DEVICE_LOCK.lock())
+        .await
+        .expect("timed out waiting for the serial FreeBSD device test lock")
 }
 
 macro_rules! require_root {
     () => {
+        // SAFETY: geteuid has no preconditions.
         if unsafe { libc::geteuid() } != 0 {
             if std::env::var_os("TOKIO_TUN_REQUIRE_PRIVILEGED").is_some() {
                 panic!("FreeBSD TUN/TAP tests require root");
@@ -37,6 +40,7 @@ macro_rules! require_root {
     };
 }
 
+#[ignore = "requires root/CAP_NET_ADMIN"]
 #[tokio::test]
 async fn test_freebsd_tun_device() {
     require_root!();
@@ -65,9 +69,10 @@ async fn test_freebsd_tun_device() {
         tun.destination().unwrap(),
         IpAddr::V4(Ipv4Addr::new(10, 211, 0, 2))
     );
-    assert_ne!(tun.flags().unwrap() & libc::IFF_UP as i16, 0);
+    assert_ne!(tun.flags().unwrap() & libc::IFF_UP as u32, 0);
 }
 
+#[ignore = "requires root/CAP_NET_ADMIN"]
 #[tokio::test]
 async fn test_freebsd_tun_packet_io() {
     require_root!();
@@ -89,12 +94,13 @@ async fn test_freebsd_tun_packet_io() {
     let reader = tokio::spawn(async move {
         let mut buffer = vec![0u8; 65_535];
         loop {
-            let n = reader_tun.recv(&mut buffer).await.unwrap();
-            if buffer[..n]
+            let packet = reader_tun.recv(&mut buffer).await.unwrap();
+            if packet
+                .payload()
                 .windows(b"freebsd tun packet".len())
                 .any(|window| window == b"freebsd tun packet")
             {
-                let _ = tx.send((n, buffer[..n].to_vec()));
+                let _ = tx.send((packet.len(), packet.payload().to_vec()));
                 break;
             }
         }
@@ -117,9 +123,13 @@ async fn test_freebsd_tun_packet_io() {
 
     let (first, second) = packet.split_at(8);
     let bufs = [IoSlice::new(first), IoSlice::new(second)];
-    assert_eq!(tun.sendv(&bufs).await.unwrap(), n);
+    timeout(Duration::from_secs(3), tun.sendv(&bufs))
+        .await
+        .expect("sendv timed out")
+        .unwrap();
 }
 
+#[ignore = "requires root/CAP_NET_ADMIN"]
 #[tokio::test]
 async fn test_freebsd_tap_device() {
     require_root!();
@@ -142,9 +152,13 @@ async fn test_freebsd_tap_device() {
     frame[..6].fill(0xff);
     frame[6..12].copy_from_slice(&[0x02, 0, 0, 0, 0, 1]);
     frame[12..14].copy_from_slice(&[0x08, 0x00]);
-    assert_eq!(tap.send(&frame).await.unwrap(), frame.len());
+    timeout(Duration::from_secs(3), tap.send(&frame))
+        .await
+        .expect("send timed out")
+        .unwrap();
 }
 
+#[ignore = "requires root/CAP_NET_ADMIN"]
 #[tokio::test]
 async fn test_freebsd_ipv6_address() {
     require_root!();
@@ -175,6 +189,7 @@ async fn test_freebsd_ipv6_address() {
     assert!(tun.destination().is_err());
 }
 
+#[ignore = "requires root/CAP_NET_ADMIN"]
 #[tokio::test]
 async fn test_freebsd_tun_ipv6_packet_io() {
     require_root!();
@@ -196,12 +211,13 @@ async fn test_freebsd_tun_ipv6_packet_io() {
     let reader = tokio::spawn(async move {
         let mut buffer = vec![0u8; 65_535];
         loop {
-            let n = reader_tun.recv(&mut buffer).await.unwrap();
-            if buffer[..n]
+            let packet = reader_tun.recv(&mut buffer).await.unwrap();
+            if packet
+                .payload()
                 .windows(b"freebsd ipv6 packet".len())
                 .any(|window| window == b"freebsd ipv6 packet")
             {
-                let _ = tx.send((n, buffer[..n].to_vec()));
+                let _ = tx.send((packet.len(), packet.payload().to_vec()));
                 break;
             }
         }
@@ -246,9 +262,13 @@ async fn test_freebsd_tun_ipv6_packet_io() {
 
     let (first, second) = packet.split_at(8);
     let bufs = [IoSlice::new(first), IoSlice::new(second)];
-    assert_eq!(tun.sendv(&bufs).await.unwrap(), n);
+    timeout(Duration::from_secs(3), tun.sendv(&bufs))
+        .await
+        .expect("sendv timed out")
+        .unwrap();
 }
 
+#[ignore = "requires root/CAP_NET_ADMIN"]
 #[tokio::test]
 async fn test_freebsd_tun_queue_transfer() {
     require_root!();
@@ -273,12 +293,13 @@ async fn test_freebsd_tun_queue_transfer() {
     let task = tokio::spawn(async move {
         let mut buffer = vec![0u8; 65_535];
         loop {
-            let n = reader.recv(&mut buffer).await.unwrap();
-            if buffer[..n]
+            let packet = reader.recv(&mut buffer).await.unwrap();
+            if packet
+                .payload()
                 .windows(b"freebsd queue transfer".len())
                 .any(|window| window == b"freebsd queue transfer")
             {
-                let _ = tx.send((n, buffer[..n].to_vec()));
+                let _ = tx.send((packet.len(), packet.payload().to_vec()));
                 break;
             }
         }
@@ -300,6 +321,7 @@ async fn test_freebsd_tun_queue_transfer() {
     assert!(n >= 20 + 8);
 }
 
+#[ignore = "requires root/CAP_NET_ADMIN"]
 #[tokio::test]
 async fn test_freebsd_tun_address_without_destination() {
     require_root!();
@@ -329,11 +351,12 @@ async fn test_freebsd_rejects_non_128_ipv6_destination() {
         .build();
     assert!(matches!(
         result,
-        Err(tokio_tun::Error::IoError(ref err))
+        Err(ref err)
             if err.kind() == std::io::ErrorKind::InvalidInput
     ));
 }
 
+#[ignore = "requires root/CAP_NET_ADMIN"]
 #[tokio::test]
 async fn test_freebsd_tun_truncation_is_reported() {
     require_root!();
@@ -373,11 +396,12 @@ async fn test_freebsd_rejects_tap_destination() {
         .build();
     assert!(matches!(
         result,
-        Err(tokio_tun::Error::IoError(ref err))
+        Err(ref err)
             if err.kind() == std::io::ErrorKind::InvalidInput
     ));
 }
 
+#[ignore = "requires root/CAP_NET_ADMIN"]
 #[tokio::test]
 async fn test_freebsd_default_build_is_transient() {
     require_root!();
@@ -394,12 +418,16 @@ async fn test_freebsd_default_build_is_transient() {
     let name_c = std::ffi::CString::new(name.clone()).unwrap();
     drop(tap);
     assert_eq!(
-        unsafe { libc::if_nametoindex(name_c.as_ptr()) },
+        unsafe {
+            // SAFETY: `name_c` is a NUL-terminated CString valid for the call.
+            libc::if_nametoindex(name_c.as_ptr())
+        },
         0,
         "non-persistent device {name} survived close"
     );
 }
 
+#[ignore = "requires root/CAP_NET_ADMIN"]
 #[tokio::test]
 async fn test_freebsd_tap_mac_address() {
     require_root!();
@@ -427,6 +455,7 @@ async fn test_freebsd_tap_mac_address() {
     );
 }
 
+#[ignore = "requires root/CAP_NET_ADMIN"]
 #[tokio::test]
 async fn test_freebsd_tun_mac_address_unsupported() {
     require_root!();
@@ -435,21 +464,22 @@ async fn test_freebsd_tun_mac_address_unsupported() {
     let tun = Tun::builder().name("").up().build().unwrap().pop().unwrap();
     assert!(matches!(
         tun.mac_address(),
-        Err(tokio_tun::Error::IoError(ref err))
+        Err(ref err)
             if err.kind() == std::io::ErrorKind::Unsupported
     ));
     assert!(matches!(
         tun.set_mac_address([0x02, 0x11, 0x22, 0x33, 0x44, 0x55]),
-        Err(tokio_tun::Error::IoError(ref err))
+        Err(ref err)
             if err.kind() == std::io::ErrorKind::Unsupported
     ));
     assert!(matches!(
         tun.broadcast(),
-        Err(tokio_tun::Error::IoError(ref err))
+        Err(ref err)
             if err.kind() == std::io::ErrorKind::Unsupported
     ));
 }
 
+#[ignore = "requires root/CAP_NET_ADMIN"]
 #[tokio::test]
 async fn test_freebsd_persist_survives_close_and_can_be_reattached() {
     require_root!();
@@ -470,7 +500,10 @@ async fn test_freebsd_persist_survives_close_and_can_be_reattached() {
 
     let name_c = std::ffi::CString::new(name.clone()).unwrap();
     assert!(
-        unsafe { libc::if_nametoindex(name_c.as_ptr()) } > 0,
+        unsafe {
+            // SAFETY: `name_c` is a NUL-terminated CString valid for the call.
+            libc::if_nametoindex(name_c.as_ptr())
+        } > 0,
         "persistent device {name} disappeared after close"
     );
 
@@ -485,7 +518,10 @@ async fn test_freebsd_persist_survives_close_and_can_be_reattached() {
     assert_ne!(other.name(), name);
     drop(other);
     assert!(
-        unsafe { libc::if_nametoindex(name_c.as_ptr()) } > 0,
+        unsafe {
+            // SAFETY: `name_c` is a NUL-terminated CString valid for the call.
+            libc::if_nametoindex(name_c.as_ptr())
+        } > 0,
         "unnamed allocation adopted and destroyed persistent device {name}"
     );
 
@@ -499,7 +535,10 @@ async fn test_freebsd_persist_survives_close_and_can_be_reattached() {
     assert_eq!(reattached.name(), name);
     drop(reattached);
     assert!(
-        unsafe { libc::if_nametoindex(name_c.as_ptr()) } > 0,
+        unsafe {
+            // SAFETY: `name_c` is a NUL-terminated CString valid for the call.
+            libc::if_nametoindex(name_c.as_ptr())
+        } > 0,
         "persistent device {name} disappeared after reattach close"
     );
 
@@ -513,6 +552,7 @@ async fn test_freebsd_persist_survives_close_and_can_be_reattached() {
     );
 }
 
+#[ignore = "requires root/CAP_NET_ADMIN"]
 #[tokio::test]
 async fn test_freebsd_tap_broadcast() {
     require_root!();
@@ -548,11 +588,12 @@ async fn test_freebsd_tun_rejects_broadcast() {
         .build();
     assert!(matches!(
         result,
-        Err(tokio_tun::Error::IoError(ref err))
+        Err(ref err)
             if err.kind() == std::io::ErrorKind::InvalidInput
     ));
 }
 
+#[ignore = "requires root/CAP_NET_ADMIN"]
 #[tokio::test]
 async fn test_freebsd_tap_broadcast_is_per_address() {
     require_root!();
@@ -587,6 +628,7 @@ async fn test_freebsd_tap_broadcast_is_per_address() {
     assert_eq!(tap.broadcast().unwrap(), first);
 }
 
+#[ignore = "requires root/CAP_NET_ADMIN"]
 #[tokio::test]
 async fn test_freebsd_tap_host_prefix_has_no_broadcast() {
     require_root!();
@@ -611,7 +653,7 @@ async fn test_freebsd_tap_host_prefix_has_no_broadcast() {
     assert_eq!(address.broadcast, None);
     assert!(matches!(
         tap.broadcast(),
-        Err(tokio_tun::Error::IoError(ref err))
+        Err(ref err)
             if err.kind() == std::io::ErrorKind::AddrNotAvailable
     ));
 }
@@ -628,19 +670,28 @@ fn freebsd_device_names() -> Vec<String> {
         .collect()
 }
 
+#[ignore = "requires root/CAP_NET_ADMIN"]
 #[tokio::test]
 async fn test_freebsd_failed_persistent_build_does_not_leave_interface() {
     require_root!();
     let _serial = serial_device_test().await;
 
     let before = freebsd_device_names();
-    let result = Tun::builder().tap().name("").persist().mtu(-1).build();
+    // Passes client validation and fails in the kernel after the persistent
+    // interface has been allocated.
+    let result = Tun::builder()
+        .tap()
+        .name("")
+        .persist()
+        .mtu(i32::MAX)
+        .build();
     assert!(result.is_err(), "invalid MTU unexpectedly succeeded");
 
     let after = freebsd_device_names();
     assert_eq!(after, before, "failed persistent build leaked an interface");
 }
 
+#[ignore = "requires root/CAP_NET_ADMIN"]
 #[tokio::test]
 async fn test_freebsd_renamed_persistent_device_is_not_adopted() {
     require_root!();
@@ -685,7 +736,12 @@ async fn test_freebsd_renamed_persistent_device_is_not_adopted() {
     let _cleanup = DestroyDevice(renamed.to_owned());
 
     let renamed_c = std::ffi::CString::new(renamed).unwrap();
-    assert!(unsafe { libc::if_nametoindex(renamed_c.as_ptr()) } > 0);
+    assert!(
+        unsafe {
+            // SAFETY: `renamed_c` is a NUL-terminated CString valid for the call.
+            libc::if_nametoindex(renamed_c.as_ptr())
+        } > 0
+    );
 
     let other = Tun::builder()
         .tap()
@@ -697,14 +753,20 @@ async fn test_freebsd_renamed_persistent_device_is_not_adopted() {
     assert_ne!(other.name(), name);
     drop(other);
     assert!(
-        unsafe { libc::if_nametoindex(renamed_c.as_ptr()) } > 0,
+        unsafe {
+            // SAFETY: `renamed_c` is a NUL-terminated CString valid for the call.
+            libc::if_nametoindex(renamed_c.as_ptr())
+        } > 0,
         "unnamed allocation destroyed renamed persistent device"
     );
 
     let result = Tun::builder().tap().name(&name).build();
     assert!(result.is_err(), "stale device name unexpectedly attached");
     assert!(
-        unsafe { libc::if_nametoindex(renamed_c.as_ptr()) } > 0,
+        unsafe {
+            // SAFETY: `renamed_c` is a NUL-terminated CString valid for the call.
+            libc::if_nametoindex(renamed_c.as_ptr())
+        } > 0,
         "explicit stale name destroyed renamed persistent device"
     );
 
